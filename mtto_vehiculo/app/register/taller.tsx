@@ -1,6 +1,7 @@
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert } from "react-native";
 import { useState } from "react";
 import { router } from "expo-router";
+import { API_BASE_URL } from "../../constants/api";
 
 export default function RegisterTaller(){
 
@@ -18,7 +19,7 @@ export default function RegisterTaller(){
 
     try{
 
-      const response = await fetch("http://localhost:8000/auth/register",{
+      const response = await fetch(`${API_BASE_URL}/talleres/register`,{
         method:"POST",
         headers:{
           "Content-Type":"application/json"
@@ -36,7 +37,7 @@ export default function RegisterTaller(){
 
       if(response.ok){
         Alert.alert("Éxito","Taller registrado");
-        router.replace("/login");
+        router.replace("/");
       }
 
     }catch(error){
