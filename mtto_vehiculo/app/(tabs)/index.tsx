@@ -14,6 +14,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
+import { formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
 import storage from "../../constants/storage";
 
 type Vehiculo = {
@@ -36,6 +37,30 @@ type Solicitud = {
     modelo?: string;
     placa?: string;
   };
+  cotizacion?: {
+    marca?: string | null;
+    referencia?: string | null;
+    garantia?: string | null;
+    disponibilidad?: string | null;
+    precio?: string | null;
+    observacion?: string | null;
+    respuestas?: {
+      marca?: string | null;
+      referencia?: string | null;
+      garantia?: string | null;
+      disponibilidad?: string | null;
+      precio?: string | null;
+      observacion?: string | null;
+    }[];
+  };
+};
+
+type Notificacion = {
+  id?: number | string;
+  titulo?: string;
+  mensaje?: string;
+  tipo?: string;
+  leida?: boolean;
 };
 
 const dashboardServices = [
@@ -76,9 +101,11 @@ export default function Dashboard() {
   const isMobile = width < 900;
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
+  const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [userName, setUserName] = useState("Usuario");
   const [selectedSection, setSelectedSection] = useState("Mis vehiculos");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
   const [newKilometraje, setNewKilometraje] = useState("");
@@ -140,21 +167,33 @@ export default function Dashboard() {
         },
       });
 
-      if (response.status === 401 || solicitudesResponse.status === 401) {
+      const notificacionesResponse = await fetch(`${API_BASE_URL}/notificaciones`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (
+        response.status === 401 ||
+        solicitudesResponse.status === 401 ||
+        notificacionesResponse.status === 401
+      ) {
         await cerrarSesion();
         return;
       }
 
       const data = await response.json();
       const solicitudesData = await solicitudesResponse.json();
+      const notificacionesData = await notificacionesResponse.json();
       const items = Array.isArray(data) ? data : [];
       setVehiculos(items);
       setSolicitudes(Array.isArray(solicitudesData) ? solicitudesData : []);
+      setNotificaciones(Array.isArray(notificacionesData) ? notificacionesData : []);
 
       if (items[0]?.id != null) {
         if (!selectedVehicleId || !items.some((item) => String(item.id) === String(selectedVehicleId))) {
           setSelectedVehicleId(String(items[0].id));
-          setNewKilometraje(String(items[0].kilometraje ?? ""));
+          setNewKilometraje(formatNumberWithDots(items[0].kilometraje ?? ""));
         }
       } else {
         setSelectedVehicleId(null);
@@ -165,6 +204,7 @@ export default function Dashboard() {
       console.log("Error cargando vehiculos", error);
       setVehiculos([]);
       setSolicitudes([]);
+      setNotificaciones([]);
       setSelectedVehicleId(null);
       setEditingVehicleId(null);
       setNewKilometraje("");
@@ -178,6 +218,12 @@ export default function Dashboard() {
   useFocusEffect(
     React.useCallback(() => {
       cargarDatos();
+
+      const interval = setInterval(() => {
+        cargarDatos();
+      }, 8000);
+
+      return () => clearInterval(interval);
     }, [])
   );
 
@@ -204,6 +250,46 @@ export default function Dashboard() {
   const solicitudesFinalizadas = solicitudes.filter(
     (item) => (item.estado || "").toLowerCase() === "finalizado"
   ).length;
+  const solicitudesHistorial = solicitudes.filter((item) =>
+    ["archivada", "finalizado"].includes((item.estado || "").toLowerCase())
+  );
+  const solicitudesActivas = solicitudes.filter(
+    (item) => !["archivada", "finalizado"].includes((item.estado || "").toLowerCase())
+  );
+  const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+
+  const extraerSolicitudId = (mensaje?: string) => {
+    const match = (mensaje || "").match(/#(\d+)/);
+    return match?.[1] || null;
+  };
+
+  const abrirDesdeNotificacion = async (item: Notificacion) => {
+    try {
+      const token = await storage.getItem("token");
+      await fetch(`${API_BASE_URL}/notificaciones/${item.id}/leer`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch (error) {
+      console.log("Error marcando notificacion cliente", error);
+    }
+
+    const solicitudId = extraerSolicitudId(item.mensaje);
+    const solicitud = solicitudes.find((current) => String(current.id) === String(solicitudId));
+    const estado = (solicitud?.estado || "").toLowerCase();
+
+    setShowNotifications(false);
+    setSelectedSection(
+      ["finalizado", "cotizado", "archivada"].includes(estado) ? "Historial" : "Mis servicios"
+    );
+    setNotificaciones((current) =>
+      current.map((notification) =>
+        notification.id === item.id ? { ...notification, leida: true } : notification
+      )
+    );
+  };
 
   const normalizarTexto = (value?: string) =>
     (value || "")
@@ -212,6 +298,25 @@ export default function Dashboard() {
       .replace(/\s+/g, " ")
       .trim()
       .toLowerCase();
+
+  const esSolicitudMantenimiento = (tipoServicio?: string) => {
+    const servicio = normalizarTexto(tipoServicio);
+
+    if (!servicio) return false;
+
+    const partes = servicio
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    return partes.some(
+      (parte) =>
+        !parte.includes("bateria") &&
+        !parte.includes("llanta") &&
+        !parte.includes("aceite") &&
+        !parte.includes("filtro")
+    );
+  };
 
   const tieneSolicitudPendientePorServicio = (
     vehicleId: string | number | undefined,
@@ -236,6 +341,20 @@ export default function Dashboard() {
         String(item.vehiculo?.id) === String(vehicleId) &&
         ["pendiente", "cotizando"].includes(estado) &&
         palabrasClave.some((palabra) => servicio.includes(palabra))
+      );
+    });
+  };
+
+  const tieneSolicitudMantenimientoActiva = (vehicleId: string | number | undefined) => {
+    if (vehicleId == null) return false;
+
+    return solicitudes.some((item) => {
+      const estado = (item.estado || "").toLowerCase();
+
+      return (
+        String(item.vehiculo?.id) === String(vehicleId) &&
+        ["pendiente", "cotizando"].includes(estado) &&
+        esSolicitudMantenimiento(item.tipo_servicio)
       );
     });
   };
@@ -295,14 +414,22 @@ export default function Dashboard() {
 
   const iniciarEdicionKilometraje = (vehicle: Vehiculo) => {
     setEditingVehicleId(String(vehicle.id));
-    setNewKilometraje(String(vehicle.kilometraje ?? ""));
+    setNewKilometraje(formatNumberWithDots(vehicle.kilometraje ?? ""));
   };
 
   const guardarKilometraje = async (vehicleId: string | number) => {
-    const value = Number(newKilometraje);
+    const value = parseFormattedNumber(newKilometraje);
+    const currentMileage = Number(
+      vehiculos.find((item) => String(item.id) === String(vehicleId))?.kilometraje ?? 0
+    );
 
-    if (isNaN(value)) {
+    if (!value) {
       alert("El kilometraje debe ser numerico");
+      return;
+    }
+
+    if (value <= currentMileage) {
+      alert("El nuevo kilometraje debe ser superior al kilometraje actual");
       return;
     }
 
@@ -353,7 +480,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           vehiculo_id: Number(vehicle.id),
           tipo: serviceTitle.replace("\n", " "),
-          descripcion: `Solicitud rapida de ${serviceTitle.replace("\n", " ")} para ${vehicle.marca} ${vehicle.modelo} placa ${vehicle.placa}.`,
+          descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
         }),
       });
 
@@ -425,9 +552,9 @@ export default function Dashboard() {
                 <View style={styles.kmBlock}>
                   <View style={styles.kmLine}>
                     <MaterialCommunityIcons name="map-marker" size={18} color="#ff9f1c" />
-                    <Text style={styles.kmLabel}>Kilometraje:</Text>
+                  <Text style={styles.kmLabel}>Kilometraje:</Text>
                   </View>
-                  <Text style={styles.kmValue}>{item.kilometraje} km</Text>
+                  <Text style={styles.kmValue}>{formatKilometraje(item.kilometraje)}</Text>
 
                   {!isEditing ? (
                     <TouchableOpacity
@@ -442,7 +569,7 @@ export default function Dashboard() {
                       <TextInput
                         style={styles.kmInput}
                         value={newKilometraje}
-                        onChangeText={setNewKilometraje}
+                        onChangeText={(value) => setNewKilometraje(formatNumberWithDots(value))}
                         keyboardType="numeric"
                         placeholder="Nuevo kilometraje"
                         placeholderTextColor="#94a3b8"
@@ -467,7 +594,7 @@ export default function Dashboard() {
 
                 <View style={styles.gaugeCard}>
                   <MaterialCommunityIcons name="speedometer" size={72} color="#ffb100" />
-                  <Text style={styles.gaugeText}>{item.kilometraje} km</Text>
+                  <Text style={styles.gaugeText}>{formatKilometraje(item.kilometraje)}</Text>
                   <MaterialCommunityIcons name="car-sports" size={42} color="#4a7dff" />
                 </View>
               </View>
@@ -478,8 +605,11 @@ export default function Dashboard() {
                 <View style={styles.servicesGrid}>
                   {dashboardServices.map((service) => {
                     const isBlocked =
-                      !!service.quickRequest &&
-                      tieneSolicitudPendientePorServicio(item.id, service.title);
+                      service.quickRequest
+                        ? tieneSolicitudPendientePorServicio(item.id, service.title)
+                        : service.route === "/service-request"
+                          ? tieneSolicitudMantenimientoActiva(item.id)
+                          : false;
 
                     return (
                       <TouchableOpacity
@@ -567,11 +697,73 @@ export default function Dashboard() {
       return { label: "Finalizado", backgroundColor: "#dcfce7", color: "#166534" };
     }
 
+    if (normalizado === "archivada") {
+      return { label: "Archivada", backgroundColor: "#e2e8f0", color: "#475569" };
+    }
+
+    if (normalizado === "devuelta") {
+      return { label: "Devuelta", backgroundColor: "#fee2e2", color: "#b91c1c" };
+    }
+
+    if (normalizado === "enviado_cliente") {
+      return { label: "Cotizacion", backgroundColor: "#dcfce7", color: "#15803d" };
+    }
+
     return { label: estado || "Cotizacion", backgroundColor: "#eef2ff", color: "#3730a3" };
   };
 
+  const separarValoresCotizacion = (value?: string | null) =>
+    (value || "")
+      .split("|")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const obtenerRespuestasCliente = (item: Solicitud) => {
+    if (item.cotizacion?.respuestas && item.cotizacion.respuestas.length > 0) {
+      const respuestasValidas = item.cotizacion.respuestas.filter((respuesta) =>
+        [
+          respuesta.marca,
+          respuesta.referencia,
+          respuesta.garantia,
+          respuesta.disponibilidad,
+          respuesta.precio,
+          respuesta.observacion,
+        ].some((value) => String(value || "").trim().length > 0)
+      );
+
+      if (respuestasValidas.length > 0) {
+        return respuestasValidas;
+      }
+    }
+
+    const marcas = separarValoresCotizacion(item.cotizacion?.marca);
+    const referencias = separarValoresCotizacion(item.cotizacion?.referencia);
+    const garantias = separarValoresCotizacion(item.cotizacion?.garantia);
+    const disponibilidades = separarValoresCotizacion(item.cotizacion?.disponibilidad);
+    const precios = separarValoresCotizacion(item.cotizacion?.precio);
+    const observaciones = separarValoresCotizacion(item.cotizacion?.observacion);
+
+    const total = Math.max(
+      marcas.length,
+      referencias.length,
+      garantias.length,
+      disponibilidades.length,
+      precios.length,
+      observaciones.length
+    );
+
+    return Array.from({ length: total }, (_, index) => ({
+      marca: marcas[index] || null,
+      referencia: referencias[index] || null,
+      garantia: garantias[index] || null,
+      disponibilidad: disponibilidades[index] || null,
+      precio: precios[index] || null,
+      observacion: observaciones[index] || null,
+    }));
+  };
+
   const renderServicesSection = () => {
-    if (solicitudes.length === 0) {
+    if (solicitudesActivas.length === 0) {
       return (
         <View style={styles.placeholderCard}>
           <MaterialCommunityIcons name="clipboard-text-outline" size={42} color="#2563eb" />
@@ -585,13 +777,14 @@ export default function Dashboard() {
 
     return (
       <View style={styles.servicesListSection}>
-        {solicitudes.map((item) => {
+        {solicitudesActivas.map((item) => {
           const estadoInfo = renderEstadoServicio(item.estado);
+          const respuestasCliente = obtenerRespuestasCliente(item);
 
           return (
             <View key={String(item.id)} style={styles.serviceRequestCard}>
               <View style={styles.serviceRequestHeader}>
-                <View>
+                <View style={styles.serviceRequestHeaderContent}>
                   <Text style={styles.serviceRequestTitle}>
                     {item.tipo_servicio || "Servicio solicitado"}
                   </Text>
@@ -619,6 +812,81 @@ export default function Dashboard() {
               </Text>
 
               <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
+
+              {(item.estado || "").toLowerCase() === "enviado_cliente" && respuestasCliente.length ? (
+                <View style={styles.clientQuoteList}>
+                  {respuestasCliente.map((respuesta, index) => (
+                    <View key={`quote-${item.id}-${index}`} style={styles.clientQuoteCard}>
+                      <Text style={styles.clientQuoteTitle}>Cotizacion {index + 1}</Text>
+                      <Text style={styles.serviceRequestDescription}>Marca: {respuesta.marca || "Sin marca"}</Text>
+                      <Text style={styles.serviceRequestDescription}>
+                        Referencia: {respuesta.referencia || "Sin referencia"}
+                      </Text>
+                      <Text style={styles.serviceRequestDescription}>
+                        Garantia: {respuesta.garantia || "Sin garantia"}
+                      </Text>
+                      <Text style={styles.serviceRequestDescription}>
+                        Disponibilidad: {respuesta.disponibilidad || "Sin disponibilidad"}
+                      </Text>
+                      <Text style={styles.serviceRequestDescription}>Precio: {respuesta.precio || "0"}</Text>
+                      <Text style={styles.serviceRequestDescription}>
+                        Observacion: {respuesta.observacion || "Sin observacion"}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+            </View>
+          );
+        })}
+      </View>
+    );
+  };
+
+  const renderHistorySection = () => {
+    if (solicitudesHistorial.length === 0) {
+      return renderPlaceholderSection(
+        "Historial",
+        "Aqui podras consultar el historial de servicios realizados a tus vehiculos.",
+        "history"
+      );
+    }
+
+    return (
+      <View style={styles.servicesListSection}>
+        {solicitudesHistorial.map((item) => {
+          const estadoInfo = renderEstadoServicio(item.estado);
+
+          return (
+            <View key={`history-${item.id}`} style={styles.serviceRequestCard}>
+              <View style={styles.serviceRequestHeader}>
+                <View style={styles.serviceRequestHeaderContent}>
+                  <Text style={styles.serviceRequestTitle}>
+                    {item.tipo_servicio || "Servicio solicitado"}
+                  </Text>
+                  <Text style={styles.serviceRequestVehicle}>
+                    {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
+                      "Vehiculo"}
+                    {item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.serviceStatusPill,
+                    { backgroundColor: estadoInfo.backgroundColor },
+                  ]}
+                >
+                  <Text style={[styles.serviceStatusText, { color: estadoInfo.color }]}>
+                    {estadoInfo.label}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.serviceRequestDescription}>
+                {item.problema || "Solicitud enviada al administrador para revision."}
+              </Text>
+              <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
             </View>
           );
         })}
@@ -644,16 +912,28 @@ export default function Dashboard() {
                 />
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.iconActionButton, styles.logoutIconButton]}
-                onPress={() => {
-                  setMenuOpen(false);
-                  cerrarSesion();
-                }}
-                activeOpacity={0.9}
-              >
-                <MaterialCommunityIcons name="power" size={28} color="#ffffff" />
-              </TouchableOpacity>
+              <View style={styles.topRightActions}>
+                <TouchableOpacity
+                  style={styles.bellButton}
+                  onPress={() => setShowNotifications((current) => !current)}
+                >
+                  <MaterialCommunityIcons name="bell-outline" size={24} color="#2563eb" />
+                  <View style={styles.notificationBadge}>
+                    <Text style={styles.notificationText}>{unreadNotifications}</Text>
+                  </View>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.iconActionButton, styles.logoutIconButton]}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    cerrarSesion();
+                  }}
+                  activeOpacity={0.9}
+                >
+                  <MaterialCommunityIcons name="power" size={28} color="#ffffff" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {menuOpen ? (
@@ -702,6 +982,27 @@ export default function Dashboard() {
             ) : null}
           </View>
 
+          {showNotifications ? (
+            <View style={styles.notificationsDropdown}>
+              <Text style={styles.notificationsTitle}>Notificaciones</Text>
+              {notificaciones.length > 0 ? (
+                notificaciones.map((item) => (
+                  <TouchableOpacity
+                    key={String(item.id)}
+                    style={styles.notificationItem}
+                    activeOpacity={0.9}
+                    onPress={() => abrirDesdeNotificacion(item)}
+                  >
+                    <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
+                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
+                  </TouchableOpacity>
+                ))
+              ) : (
+                <Text style={styles.subtitle}>No tienes notificaciones nuevas.</Text>
+              )}
+            </View>
+          ) : null}
+
           {selectedSection === "Vista general" ? (
             <View style={styles.dashboardSection}>
               <View style={[styles.header, isMobile && styles.headerMobile]}>
@@ -711,15 +1012,6 @@ export default function Dashboard() {
                   <Text style={styles.subtitle}>
                     Controla tus vehiculos, servicios y solicitudes desde este panel principal.
                   </Text>
-                </View>
-
-                <View style={styles.headerActions}>
-                  <TouchableOpacity style={styles.bellButton}>
-                    <MaterialCommunityIcons name="bell-outline" size={24} color="#2563eb" />
-                    <View style={styles.notificationBadge}>
-                      <Text style={styles.notificationText}>{solicitudesCotizacion}</Text>
-                    </View>
-                  </TouchableOpacity>
                 </View>
               </View>
 
@@ -773,7 +1065,7 @@ export default function Dashboard() {
                 <View style={[styles.summaryCard, isMobile && styles.summaryCardMobile]}>
                   <Text style={styles.summaryLabel}>Kilometraje actual</Text>
                   <Text style={styles.summaryValue}>
-                    {selectedVehicle?.kilometraje != null ? `${selectedVehicle.kilometraje} km` : "--"}
+                    {selectedVehicle?.kilometraje != null ? formatKilometraje(selectedVehicle.kilometraje) : "--"}
                   </Text>
                 </View>
                 <View style={[styles.summaryCard, isMobile && styles.summaryCardMobile]}>
@@ -807,13 +1099,7 @@ export default function Dashboard() {
                 "credit-card-outline"
               )
             : null}
-          {selectedSection === "Historial"
-            ? renderPlaceholderSection(
-                "Historial",
-                "Aqui podras consultar el historial de servicios realizados a tus vehiculos.",
-                "history"
-              )
-            : null}
+          {selectedSection === "Historial" ? renderHistorySection() : null}
           {selectedSection === "Soporte"
             ? renderPlaceholderSection(
                 "Soporte",
@@ -856,6 +1142,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    marginTop: 38,
+  },
+  topRightActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 36,
   },
   iconActionButton: {
     width: 56,
@@ -1016,6 +1308,37 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 10,
     fontWeight: "800",
+  },
+  notificationsDropdown: {
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+    marginBottom: 18,
+  },
+  notificationsTitle: {
+    color: "#162033",
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 10,
+  },
+  notificationItem: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    backgroundColor: "#f8fbff",
+    padding: 14,
+    marginTop: 10,
+  },
+  notificationItemTitle: {
+    color: "#162033",
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  notificationItemText: {
+    color: "#5f6b7c",
+    lineHeight: 20,
   },
   cardsSection: {
     marginTop: 18,
@@ -1193,6 +1516,11 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     gap: 12,
   },
+  serviceRequestHeaderContent: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 8,
+  },
   serviceRequestHeaderMobile: {
     flexDirection: "column",
   },
@@ -1200,6 +1528,7 @@ const styles = StyleSheet.create({
     color: "#102447",
     fontSize: 18,
     fontWeight: "800",
+    flexShrink: 1,
   },
   serviceRequestVehicle: {
     color: "#64748b",
@@ -1207,6 +1536,8 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   serviceStatusPill: {
+    marginLeft: "auto",
+    alignSelf: "flex-start",
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -1224,6 +1555,22 @@ const styles = StyleSheet.create({
     color: "#94a3b8",
     marginTop: 12,
     fontWeight: "700",
+  },
+  clientQuoteList: {
+    gap: 12,
+    marginTop: 14,
+  },
+  clientQuoteCard: {
+    backgroundColor: "#f0fdf4",
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#bbf7d0",
+  },
+  clientQuoteTitle: {
+    color: "#166534",
+    fontWeight: "800",
+    marginBottom: 8,
   },
   cardBlock: {
     gap: 12,

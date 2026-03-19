@@ -8,6 +8,7 @@ from app.routes import vehiculos
 from app.routes import talleres
 from app.routes import proveedores
 from app.routes import solicitudes
+from app.routes import notificaciones
 
 app = FastAPI()
 
@@ -25,6 +26,7 @@ app.include_router(vehiculos.router)
 app.include_router(talleres.router)
 app.include_router(proveedores.router)
 app.include_router(solicitudes.router)
+app.include_router(notificaciones.router)
 
 
 # crear tablas

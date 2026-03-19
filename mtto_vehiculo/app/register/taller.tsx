@@ -50,7 +50,7 @@ export default function RegisterTaller(){
 
     <View style={styles.container}>
 
-      <TouchableOpacity onPress={()=>router.back()}>
+      <TouchableOpacity onPress={() => router.replace("/select-role")}>
         <Text style={styles.back}>← Volver</Text>
       </TouchableOpacity>
 

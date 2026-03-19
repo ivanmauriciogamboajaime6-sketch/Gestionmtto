@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   ScrollView,
@@ -10,7 +10,9 @@ import {
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
+import { formatKilometraje } from "../../constants/formatters";
 import storage from "../../constants/storage";
 
 type Vehiculo = {
@@ -22,14 +24,13 @@ type Vehiculo = {
   placa?: string;
 };
 
-type Taller = {
-  id: string;
-  nombre: string;
-  calificacion: string;
-  distancia: string;
-  tiempo: string;
-  email?: string;
-  telefono?: string;
+type Solicitud = {
+  id?: number | string;
+  tipo_servicio?: string;
+  estado?: string;
+  vehiculo?: {
+    id?: number | string;
+  };
 };
 
 const serviceGroups = [
@@ -95,19 +96,18 @@ const serviceGroups = [
   },
 ];
 
-const fallbackTalleres: Taller[] = [
-  { id: "1", nombre: "RenovAutos", calificacion: "4.8", distancia: "2.1 km", tiempo: "15 min" },
-  { id: "2", nombre: "Garage Motors", calificacion: "4.7", distancia: "3.4 km", tiempo: "22 min" },
-  { id: "3", nombre: "AutoFix Center", calificacion: "4.6", distancia: "4.2 km", tiempo: "28 min" },
-];
-
 const fallbackVehiculos: Vehiculo[] = [
   { id: "f-1", marca: "Toyota", modelo: "Corolla", placa: "ABC123", anio: 2022, kilometraje: 45210 },
   { id: "f-2", marca: "Mazda", modelo: "3", placa: "KHT234", anio: 2020, kilometraje: 38900 },
 ];
 
+const SERVICE_UNKNOWN = "No se que tiene mi vehiculo";
+
+const getToday = () => new Date().toISOString().slice(0, 10);
+
 export default function ServiceRequestScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const params = useLocalSearchParams<{
     vehicleId?: string;
     plate?: string;
@@ -118,75 +118,63 @@ export default function ServiceRequestScreen() {
   }>();
 
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
-  const [talleres, setTalleres] = useState<Taller[]>(fallbackTalleres);
+  const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(params.vehicleId ?? null);
-  const [selectedService, setSelectedService] = useState<string>("Cambio de aceite y filtros");
+  const [selectedServices, setSelectedServices] = useState<string[]>(["Cambio de aceite y filtros"]);
   const [descripcion, setDescripcion] = useState("");
   const [kilometraje, setKilometraje] = useState(params.mileage ?? "");
-  const [fechaRequerida, setFechaRequerida] = useState("");
-  const [selectedTallerId, setSelectedTallerId] = useState<string>("1");
+  const [fechaRequerida] = useState(getToday());
   const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    const cargarVehiculos = async () => {
-      try {
-        const token = await storage.getItem("token");
-        const response = await fetch(`${API_BASE_URL}/vehiculos`, {
+  const irAMisVehiculos = useCallback(() => {
+    navigation.navigate("index" as never);
+  }, [navigation]);
+
+  const cargarDatos = useCallback(async () => {
+    try {
+      const token = await storage.getItem("token");
+      const [vehiculosResponse, solicitudesResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/vehiculos`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
-        });
+        }),
+        fetch(`${API_BASE_URL}/solicitudes`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+      ]);
 
-        const data = await response.json();
-        const items = Array.isArray(data) && data.length > 0 ? data : fallbackVehiculos;
-        setVehiculos(items);
+      const vehiculosData = await vehiculosResponse.json();
+      const solicitudesData = await solicitudesResponse.json();
+      const items = Array.isArray(vehiculosData) && vehiculosData.length > 0 ? vehiculosData : fallbackVehiculos;
+      setVehiculos(items);
+      setSolicitudes(Array.isArray(solicitudesData) ? solicitudesData : []);
 
-        if (!selectedVehicleId && items[0]?.id != null) {
-          setSelectedVehicleId(String(items[0].id));
-        }
-      } catch (error) {
-        console.log("Error cargando vehiculos", error);
-        setVehiculos(fallbackVehiculos);
-
-        if (!selectedVehicleId) {
-          setSelectedVehicleId(String(fallbackVehiculos[0].id));
-        }
+      if (!selectedVehicleId && items[0]?.id != null) {
+        setSelectedVehicleId(String(items[0].id));
       }
-    };
+    } catch (error) {
+      console.log("Error cargando datos de solicitud", error);
+      setVehiculos(fallbackVehiculos);
+      setSolicitudes([]);
 
-    cargarVehiculos();
+      if (!selectedVehicleId) {
+        setSelectedVehicleId(String(fallbackVehiculos[0].id));
+      }
+    }
   }, [selectedVehicleId]);
 
   useEffect(() => {
-    const cargarTalleres = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/talleres`);
-        const data = await response.json();
+    cargarDatos();
+  }, [cargarDatos]);
 
-        if (Array.isArray(data) && data.length > 0) {
-          const talleresMapeados: Taller[] = data.map((taller, index) => ({
-            id: String(taller.id ?? index + 1),
-            nombre: taller.nombre || "Taller",
-            email: taller.email || "",
-            telefono: taller.telefono || "",
-            calificacion: "4.8",
-            distancia: `${(index + 2).toFixed(1)} km`,
-            tiempo: `${15 + index * 7} min`,
-          }));
-
-          setTalleres(talleresMapeados);
-          setSelectedTallerId(String(talleresMapeados[0].id));
-        } else {
-          setTalleres(fallbackTalleres);
-        }
-      } catch (error) {
-        console.log("Error cargando talleres", error);
-        setTalleres(fallbackTalleres);
-      }
-    };
-
-    cargarTalleres();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      cargarDatos();
+    }, [cargarDatos])
+  );
 
   const vehiculosDisponibles = useMemo(() => {
     if (vehiculos.length > 0) return vehiculos;
@@ -211,7 +199,69 @@ export default function ServiceRequestScreen() {
     vehiculosDisponibles.find((item) => String(item.id) === String(selectedVehicleId)) ||
     vehiculosDisponibles[0];
 
-  const selectedTaller = talleres.find((item) => item.id === selectedTallerId) || talleres[0];
+  useEffect(() => {
+    if (selectedVehicle?.kilometraje != null) {
+      setKilometraje(String(selectedVehicle.kilometraje));
+    }
+  }, [selectedVehicle]);
+
+  const toggleService = (service: string) => {
+    setSelectedServices((current) => {
+      if (service === SERVICE_UNKNOWN) {
+        return current.includes(SERVICE_UNKNOWN) ? [] : [SERVICE_UNKNOWN];
+      }
+
+      const withoutUnknown = current.filter((item) => item !== SERVICE_UNKNOWN);
+
+      if (withoutUnknown.includes(service)) {
+        return withoutUnknown.filter((item) => item !== service);
+      }
+
+      return [...withoutUnknown, service];
+    });
+  };
+
+  const normalizarTexto = (value?: string) =>
+    (value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+
+  const esSolicitudMantenimiento = (tipoServicio?: string) => {
+    const servicio = normalizarTexto(tipoServicio);
+
+    if (!servicio) return false;
+
+    const partes = servicio
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    return partes.some(
+      (parte) =>
+        !parte.includes("bateria") &&
+        !parte.includes("llanta") &&
+        !parte.includes("aceite") &&
+        !parte.includes("filtro")
+    );
+  };
+
+  const solicitudActiva = useMemo(
+    () =>
+      solicitudes.some((item) => {
+        const estado = (item.estado || "").toLowerCase();
+        const isOpenState = !["archivada", "devuelta", "finalizado", "rechazada"].includes(estado);
+
+        return (
+          isOpenState &&
+          esSolicitudMantenimiento(item.tipo_servicio) &&
+          String(item.vehiculo?.id) === String(selectedVehicle?.id)
+        );
+      }),
+    [selectedVehicle?.id, solicitudes]
+  );
 
   const enviarSolicitud = async () => {
     if (!selectedVehicle?.id) {
@@ -219,8 +269,23 @@ export default function ServiceRequestScreen() {
       return;
     }
 
+    if (selectedServices.length === 0) {
+      Alert.alert("Error", "Debes seleccionar al menos un servicio");
+      return;
+    }
+
     if (!descripcion.trim()) {
       Alert.alert("Error", "Debes describir el problema");
+      return;
+    }
+
+    if (descripcion.trim().length > 200) {
+      Alert.alert("Error", "La descripcion no puede superar los 200 caracteres");
+      return;
+    }
+
+    if (solicitudActiva) {
+      Alert.alert("Solicitud en curso", "Este vehiculo ya tiene una solicitud activa.");
       return;
     }
 
@@ -236,7 +301,7 @@ export default function ServiceRequestScreen() {
         },
         body: JSON.stringify({
           vehiculo_id: Number(selectedVehicle.id),
-          tipo: selectedService,
+          tipo: selectedServices.join(", "),
           descripcion: descripcion.trim(),
         }),
       });
@@ -250,9 +315,9 @@ export default function ServiceRequestScreen() {
 
       Alert.alert(
         "Solicitud enviada",
-        `Tu solicitud fue enviada al administrador para revision y cotizacion. Taller sugerido: ${selectedTaller?.nombre || "Sin seleccionar"}.`
+        "Tu solicitud fue enviada al administrador para revision y cotizacion."
       );
-      router.replace("/(tabs)");
+      irAMisVehiculos();
     } catch (error) {
       console.log("Error creando solicitud", error);
       Alert.alert("Error", "No se pudo conectar al servidor");
@@ -263,16 +328,13 @@ export default function ServiceRequestScreen() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <MaterialCommunityIcons name="arrow-left" size={22} color="#162033" />
-        </TouchableOpacity>
-
-        <View style={styles.headerText}>
-          <Text style={styles.eyebrow}>Solicitud de servicio</Text>
-          <Text style={styles.title}>Vehicle Service Request</Text>
-        </View>
-      </View>
+      <TouchableOpacity
+        style={styles.vehiclesShortcutButton}
+        onPress={irAMisVehiculos}
+      >
+        <MaterialCommunityIcons name="car-outline" size={18} color="#2563eb" />
+        <Text style={styles.vehiclesShortcutText}>Volver a Mis vehiculos</Text>
+      </TouchableOpacity>
 
       <View style={styles.hero}>
         <Text style={styles.heroTitle}>Programa la atencion de tu vehiculo</Text>
@@ -329,7 +391,7 @@ export default function ServiceRequestScreen() {
           <Text style={styles.sectionTitle}>Elegir tipo de servicio</Text>
         </View>
 
-        <Text style={styles.helperText}>Selecciona el servicio puntual. Los radio button van sobre cada servicio.</Text>
+        <Text style={styles.helperText}>Selecciona uno o varios servicios segun lo que necesites.</Text>
 
         <View style={styles.radioList}>
           {serviceGroups.map((group) => (
@@ -339,13 +401,13 @@ export default function ServiceRequestScreen() {
 
               <View style={styles.groupServices}>
                 {group.services.map((service) => {
-                  const selected = service === selectedService;
+                  const selected = selectedServices.includes(service);
 
                   return (
                     <TouchableOpacity
                       key={service}
                       style={[styles.radioCard, selected && styles.radioCardSelected]}
-                      onPress={() => setSelectedService(service)}
+                      onPress={() => toggleService(service)}
                     >
                       <View style={[styles.radioOuter, selected && styles.radioOuterActive]}>
                         {selected ? <View style={styles.radioInner} /> : null}
@@ -363,21 +425,31 @@ export default function ServiceRequestScreen() {
             <Text style={styles.serviceGroupDescription}>Opcion importante cuando la falla no esta clara</Text>
 
             <TouchableOpacity
-              style={[styles.radioCard, selectedService === "No se que tiene mi vehiculo" && styles.radioCardSelected]}
-              onPress={() => setSelectedService("No se que tiene mi vehiculo")}
+              style={[
+                styles.radioCard,
+                selectedServices.includes(SERVICE_UNKNOWN) && styles.radioCardSelected,
+                selectedServices.length > 0 &&
+                  !selectedServices.includes(SERVICE_UNKNOWN) &&
+                  styles.radioCardDisabled,
+              ]}
+              onPress={() => toggleService(SERVICE_UNKNOWN)}
+              disabled={selectedServices.length > 0 && !selectedServices.includes(SERVICE_UNKNOWN)}
             >
               <View
                 style={[
                   styles.radioOuter,
-                  selectedService === "No se que tiene mi vehiculo" && styles.radioOuterActive,
+                  selectedServices.includes(SERVICE_UNKNOWN) && styles.radioOuterActive,
                 ]}
               >
-                {selectedService === "No se que tiene mi vehiculo" ? <View style={styles.radioInner} /> : null}
+                {selectedServices.includes(SERVICE_UNKNOWN) ? <View style={styles.radioInner} /> : null}
               </View>
               <Text
                 style={[
                   styles.radioLabel,
-                  selectedService === "No se que tiene mi vehiculo" && styles.radioLabelSelected,
+                  selectedServices.includes(SERVICE_UNKNOWN) && styles.radioLabelSelected,
+                  selectedServices.length > 0 &&
+                    !selectedServices.includes(SERVICE_UNKNOWN) &&
+                    styles.radioLabelDisabled,
                 ]}
               >
                 No se que tiene mi vehiculo
@@ -406,30 +478,23 @@ export default function ServiceRequestScreen() {
           onChangeText={setDescripcion}
           placeholder="Ejemplo: El vehiculo hace ruido al frenar"
           placeholderTextColor="#94a3b8"
+          maxLength={200}
         />
+        <Text style={styles.counterText}>{descripcion.length}/200</Text>
 
         <View style={styles.doubleRow}>
           <View style={styles.flexItem}>
             <Text style={styles.inputLabel}>Kilometraje actual</Text>
-            <TextInput
-              style={styles.input}
-              value={kilometraje}
-              onChangeText={setKilometraje}
-              placeholder="45210"
-              placeholderTextColor="#94a3b8"
-              keyboardType="numeric"
-            />
+            <View style={[styles.input, styles.readOnlyInput]}>
+              <Text style={styles.readOnlyValue}>{formatKilometraje(kilometraje)}</Text>
+            </View>
           </View>
 
           <View style={styles.flexItem}>
-            <Text style={styles.inputLabel}>Fecha requerida</Text>
-            <TextInput
-              style={styles.input}
-              value={fechaRequerida}
-              onChangeText={setFechaRequerida}
-              placeholder="2026-03-20"
-              placeholderTextColor="#94a3b8"
-            />
+            <Text style={styles.inputLabel}>Fecha de solicitud</Text>
+            <View style={[styles.input, styles.readOnlyInput]}>
+              <Text style={styles.readOnlyValue}>{fechaRequerida}</Text>
+            </View>
           </View>
         </View>
 
@@ -448,67 +513,28 @@ export default function ServiceRequestScreen() {
         </View>
       </View>
 
-      <View style={styles.sectionCard}>
-        <View style={styles.stepHeader}>
-          <View style={styles.stepBadge}>
-            <Text style={styles.stepBadgeText}>Paso 4</Text>
-          </View>
-          <Text style={styles.sectionTitle}>Elegir taller</Text>
-        </View>
-
-        <Text style={styles.helperText}>La app muestra talleres cercanos.</Text>
-
-        <View style={styles.tallerList}>
-          {talleres.map((taller) => {
-            const selected = taller.id === selectedTallerId;
-
-            return (
-              <TouchableOpacity
-                key={taller.id}
-                style={[styles.tallerCard, selected && styles.tallerCardSelected]}
-                onPress={() => setSelectedTallerId(taller.id)}
-              >
-                <View style={styles.tallerTop}>
-                  <View>
-                    <Text style={styles.tallerName}>{taller.nombre}</Text>
-                    <Text style={styles.tallerRating}>{taller.calificacion} estrella</Text>
-                  </View>
-                  <View style={[styles.radioOuter, selected && styles.radioOuterActive]}>
-                    {selected ? <View style={styles.radioInner} /> : null}
-                  </View>
-                </View>
-
-                <View style={styles.tallerMetaRow}>
-                  <View style={styles.metaPill}>
-                    <MaterialCommunityIcons name="map-marker-outline" size={14} color="#475569" />
-                    <Text style={styles.metaPillText}>{taller.distancia}</Text>
-                  </View>
-
-                  <View style={styles.metaPill}>
-                    <MaterialCommunityIcons name="clock-outline" size={14} color="#475569" />
-                    <Text style={styles.metaPillText}>{taller.tiempo}</Text>
-                  </View>
-                </View>
-
-                {taller.telefono ? (
-                  <Text style={styles.tallerContact}>Telefono: {taller.telefono}</Text>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-
       <View style={styles.summaryCard}>
         <Text style={styles.summaryTitle}>Resumen de solicitud</Text>
         <Text style={styles.summaryText}>
           Vehiculo: {selectedVehicle?.marca} {selectedVehicle?.modelo} {selectedVehicle?.placa ? `- ${selectedVehicle.placa}` : ""}
         </Text>
-        <Text style={styles.summaryText}>Servicio: {selectedService}</Text>
+        <Text style={styles.summaryText}>Servicios: {selectedServices.join(", ") || "Sin seleccionar"}</Text>
+        <Text style={styles.summaryText}>Kilometraje: {formatKilometraje(kilometraje)}</Text>
         <Text style={styles.summaryText}>Administrador: revision y cotizacion</Text>
-        <Text style={styles.summaryText}>Taller sugerido: {selectedTaller?.nombre}</Text>
+        {solicitudActiva ? (
+          <Text style={styles.warningText}>
+            Este vehiculo ya tiene una solicitud activa. Debes esperar a que cambie de estado.
+          </Text>
+        ) : null}
 
-        <TouchableOpacity style={styles.submitButton} onPress={enviarSolicitud}>
+        <TouchableOpacity
+          style={[
+            styles.submitButton,
+            (sending || solicitudActiva || selectedServices.length === 0) && styles.submitButtonDisabled,
+          ]}
+          onPress={enviarSolicitud}
+          disabled={sending || solicitudActiva || selectedServices.length === 0}
+        >
           <Text style={styles.submitButtonText}>
             {sending ? "Enviando..." : "Solicitar servicio"}
           </Text>
@@ -528,38 +554,27 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
     gap: 16,
   },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    backgroundColor: "#ffffff",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#e7edf5",
-  },
-  headerText: {
-    flex: 1,
-  },
-  eyebrow: {
-    color: "#7a8597",
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  title: {
-    color: "#162033",
-    fontSize: 24,
-    fontWeight: "800",
-  },
   hero: {
     backgroundColor: "#162033",
     borderRadius: 26,
     padding: 20,
+  },
+  vehiclesShortcutButton: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 18,
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#d7e4fb",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  vehiclesShortcutText: {
+    color: "#2563eb",
+    fontWeight: "700",
   },
   heroTitle: {
     color: "#ffffff",
@@ -669,6 +684,9 @@ const styles = StyleSheet.create({
     borderColor: "#2563eb",
     backgroundColor: "#eef4ff",
   },
+  radioCardDisabled: {
+    opacity: 0.45,
+  },
   radioOuter: {
     width: 22,
     height: 22,
@@ -696,6 +714,9 @@ const styles = StyleSheet.create({
   radioLabelSelected: {
     color: "#162033",
   },
+  radioLabelDisabled: {
+    color: "#94a3b8",
+  },
   inputLabel: {
     color: "#334155",
     fontWeight: "700",
@@ -714,6 +735,21 @@ const styles = StyleSheet.create({
   textArea: {
     minHeight: 110,
     textAlignVertical: "top",
+  },
+  readOnlyInput: {
+    justifyContent: "center",
+    backgroundColor: "#f8fafc",
+  },
+  readOnlyValue: {
+    color: "#162033",
+    fontWeight: "700",
+  },
+  counterText: {
+    marginTop: -6,
+    marginBottom: 12,
+    color: "#64748b",
+    fontSize: 12,
+    textAlign: "right",
   },
   doubleRow: {
     flexDirection: "row",
@@ -745,58 +781,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontSize: 12,
   },
-  tallerList: {
-    gap: 12,
-  },
-  tallerCard: {
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#e7edf5",
-    padding: 16,
-    backgroundColor: "#f8fbff",
-  },
-  tallerCardSelected: {
-    borderColor: "#2563eb",
-    backgroundColor: "#eef4ff",
-  },
-  tallerTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  tallerName: {
-    color: "#162033",
-    fontWeight: "800",
-    fontSize: 17,
-  },
-  tallerRating: {
-    color: "#64748b",
-    marginTop: 5,
-  },
-  tallerMetaRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 12,
-  },
-  tallerContact: {
-    color: "#64748b",
-    marginTop: 10,
-    fontSize: 12,
-  },
-  metaPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#ffffff",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  metaPillText: {
-    color: "#475569",
-    marginLeft: 6,
-    fontSize: 12,
-    fontWeight: "600",
-  },
   summaryCard: {
     backgroundColor: "#ffffff",
     borderRadius: 24,
@@ -825,5 +809,14 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontWeight: "800",
     fontSize: 16,
+  },
+  submitButtonDisabled: {
+    opacity: 0.55,
+  },
+  warningText: {
+    color: "#b45309",
+    marginBottom: 6,
+    lineHeight: 20,
+    fontWeight: "600",
   },
 });

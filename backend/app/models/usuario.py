@@ -12,3 +12,4 @@ class Usuario(Base):
     password = Column(String)
     rol = Column(String)
     estado = Column(String, default="activo")
+    especialidad = Column(String, nullable=True)

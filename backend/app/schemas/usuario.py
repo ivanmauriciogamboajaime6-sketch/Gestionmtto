@@ -5,6 +5,7 @@ class UsuarioCreate(BaseModel):
     email: str
     telefono: str
     password: str
+    especialidad: str | None = None
 
 
 class UsuarioLogin(BaseModel):

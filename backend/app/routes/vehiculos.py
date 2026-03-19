@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -14,13 +15,24 @@ def crear_vehiculo(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    placa_normalizada = data.placa.strip().upper()
+
+    if data.kilometraje > 2147483647:
+        raise HTTPException(status_code=400, detail="El kilometraje supera el limite permitido")
+
+    placa_existente = db.query(Vehiculo).filter(
+        func.upper(Vehiculo.placa) == placa_normalizada
+    ).first()
+
+    if placa_existente:
+        raise HTTPException(status_code=400, detail="La placa ya esta registrada")
 
     vehiculo = Vehiculo(
         usuario_id=user["id"],
         marca=data.marca,
         modelo=data.modelo,
         anio=data.anio,
-        placa=data.placa,
+        placa=placa_normalizada,
         kilometraje=data.kilometraje,
         combustible=data.combustible
     )
@@ -71,6 +83,9 @@ def actualizar_kilometraje(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
+    if data.kilometraje > 2147483647:
+        raise HTTPException(status_code=400, detail="El kilometraje supera el limite permitido")
+
     vehiculo = db.query(Vehiculo).filter(
         Vehiculo.id == vehiculo_id,
         Vehiculo.usuario_id == user["id"]

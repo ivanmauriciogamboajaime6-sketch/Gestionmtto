@@ -137,7 +137,7 @@ export default function Login() {
           </View>
 
           <TouchableOpacity style={styles.button} onPress={handleLogin}>
-            <Text style={styles.buttonText}>Log in my account</Text>
+            <Text style={styles.buttonText}>Ingresar</Text>
           </TouchableOpacity>
 
           <Text style={styles.registerText}>

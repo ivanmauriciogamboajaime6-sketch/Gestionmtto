@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -8,11 +8,14 @@ import {
   View,
 } from "react-native";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { API_BASE_URL } from "../../../constants/api";
+import { formatNumberWithDots, parseFormattedNumber } from "../../../constants/formatters";
 import storage from "../../../constants/storage";
 
 const carFuelOptions = ["gasolina", "gas", "diesel"];
 const motoFuelOptions = ["gasolina", "electrica"];
+const MAX_KILOMETRAJE = 2147483647;
 
 export default function CreateVehicle() {
   const [tipoVehiculo, setTipoVehiculo] = useState<"carro" | "moto" | "">("");
@@ -22,8 +25,30 @@ export default function CreateVehicle() {
   const [placa, setPlaca] = useState("");
   const [kilometraje, setKilometraje] = useState("");
   const [combustible, setCombustible] = useState("");
+  const [showYearOptions, setShowYearOptions] = useState(false);
 
   const fuelOptions = tipoVehiculo === "moto" ? motoFuelOptions : carFuelOptions;
+  const availableYears = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    return Array.from({ length: currentYear - 1970 + 1 }, (_, index) => String(currentYear - index));
+  }, []);
+
+  const limpiarFormulario = useCallback(() => {
+    setTipoVehiculo("");
+    setMarca("");
+    setModelo("");
+    setAnio("");
+    setPlaca("");
+    setKilometraje("");
+    setCombustible("");
+    setShowYearOptions(false);
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      limpiarFormulario();
+    }, [limpiarFormulario])
+  );
 
   const guardarVehiculo = async () => {
     try {
@@ -37,15 +62,27 @@ export default function CreateVehicle() {
         return;
       }
 
-      if (isNaN(Number(anio)) || isNaN(Number(kilometraje))) {
-        alert("Año y kilometraje deben ser números");
+      const kilometrajeValue = parseFormattedNumber(kilometraje);
+
+      if (isNaN(Number(anio)) || !kilometrajeValue) {
+        alert("Año y kilometraje deben ser numeros");
+        return;
+      }
+
+      if (kilometrajeValue > MAX_KILOMETRAJE) {
+        alert("El kilometraje supera el limite permitido");
+        return;
+      }
+
+      if (placa.trim().length > 10) {
+        alert("La placa no puede superar los 10 caracteres");
         return;
       }
 
       const token = await storage.getItem("token");
 
       if (!token) {
-        alert("Sesión expirada. Inicia sesión nuevamente.");
+        alert("Sesion expirada. Inicia sesion nuevamente.");
         router.replace("/");
         return;
       }
@@ -61,7 +98,7 @@ export default function CreateVehicle() {
           modelo,
           anio: Number(anio),
           placa,
-          kilometraje: Number(kilometraje),
+          kilometraje: kilometrajeValue,
           combustible,
         }),
       });
@@ -69,7 +106,7 @@ export default function CreateVehicle() {
       const data = await response.json();
 
       if (!response.ok) {
-        alert("Error: " + JSON.stringify(data));
+        alert(data.detail || data.error || "No se pudo registrar el vehiculo");
         return;
       }
 
@@ -83,12 +120,12 @@ export default function CreateVehicle() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-        <Text style={styles.backButtonText}>← Regresar</Text>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.replace("/(tabs)")}>
+        <Text style={styles.backButtonText}>Regresar</Text>
       </TouchableOpacity>
 
-      <Text style={styles.title}>Registrar vehículo</Text>
-      <Text style={styles.subtitle}>Primero selecciona el tipo de vehículo.</Text>
+      <Text style={styles.title}>Registrar vehiculo</Text>
+      <Text style={styles.subtitle}>Primero selecciona el tipo de vehiculo.</Text>
 
       <View style={styles.selectorRow}>
         {["carro", "moto"].map((tipo) => {
@@ -99,8 +136,8 @@ export default function CreateVehicle() {
               key={tipo}
               style={[styles.selectorCard, selected && styles.selectorCardActive]}
               onPress={() => {
+                limpiarFormulario();
                 setTipoVehiculo(tipo as "carro" | "moto");
-                setCombustible("");
               }}
             >
               <View style={[styles.radioOuter, selected && styles.radioOuterActive]}>
@@ -124,30 +161,53 @@ export default function CreateVehicle() {
             placeholder="Marca *"
             style={styles.input}
             value={marca}
-            onChangeText={setMarca}
+            onChangeText={(value) => setMarca(value.slice(0, 15))}
+            maxLength={15}
           />
 
           <TextInput
             placeholder="Modelo *"
             style={styles.input}
             value={modelo}
-            onChangeText={setModelo}
+            onChangeText={(value) => setModelo(value.slice(0, 15))}
+            maxLength={15}
           />
 
-          <TextInput
-            placeholder="Año *"
-            keyboardType="numeric"
+          <TouchableOpacity
             style={styles.input}
-            value={anio}
-            onChangeText={setAnio}
-          />
+            onPress={() => setShowYearOptions((current) => !current)}
+          >
+            <Text style={anio ? styles.inputText : styles.placeholderText}>{anio || "Año *"}</Text>
+          </TouchableOpacity>
+
+          {showYearOptions ? (
+            <ScrollView style={styles.yearList} nestedScrollEnabled>
+              <View style={styles.yearGrid}>
+                {availableYears.map((year) => (
+                  <TouchableOpacity
+                    key={year}
+                    style={[styles.yearItem, anio === year && styles.yearItemActive]}
+                    onPress={() => {
+                      setAnio(year);
+                      setShowYearOptions(false);
+                    }}
+                  >
+                    <Text style={[styles.yearItemText, anio === year && styles.yearItemTextActive]}>
+                      {year}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          ) : null}
 
           <TextInput
             placeholder="Placa *"
             autoCapitalize="characters"
             style={styles.input}
             value={placa}
-            onChangeText={setPlaca}
+            onChangeText={(value) => setPlaca(value.toUpperCase().slice(0, 10))}
+            maxLength={10}
           />
 
           <TextInput
@@ -155,7 +215,10 @@ export default function CreateVehicle() {
             keyboardType="numeric"
             style={styles.input}
             value={kilometraje}
-            onChangeText={setKilometraje}
+            onChangeText={(value) =>
+              setKilometraje(formatNumberWithDots(value.replace(/\D/g, "").slice(0, 9)))
+            }
+            maxLength={11}
           />
 
           <Text style={styles.inputLabel}>Tipo de combustible *</Text>
@@ -174,9 +237,9 @@ export default function CreateVehicle() {
                   </View>
                   <Text style={[styles.fuelText, selected && styles.selectorTextActive]}>
                     {option === "diesel"
-                      ? "Diésel"
+                      ? "Diesel"
                       : option === "electrica"
-                        ? "Eléctrica"
+                        ? "Electrica"
                         : option.charAt(0).toUpperCase() + option.slice(1)}
                   </Text>
                 </TouchableOpacity>
@@ -185,14 +248,12 @@ export default function CreateVehicle() {
           </View>
 
           <TouchableOpacity style={styles.button} onPress={guardarVehiculo}>
-            <Text style={styles.buttonText}>Guardar vehículo</Text>
+            <Text style={styles.buttonText}>Guardar vehiculo</Text>
           </TouchableOpacity>
         </View>
       ) : (
         <View style={styles.helperCard}>
-          <Text style={styles.helperText}>
-            Selecciona carro o moto para desplegar el formulario.
-          </Text>
+          <Text style={styles.helperText}>Selecciona carro o moto para desplegar el formulario.</Text>
         </View>
       )}
     </ScrollView>
@@ -297,6 +358,46 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     borderWidth: 1,
     borderColor: "#e4e4e4",
+  },
+  inputText: {
+    color: "#162033",
+  },
+  placeholderText: {
+    color: "#6b7280",
+  },
+  yearList: {
+    maxHeight: 220,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  yearGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    padding: 8,
+    gap: 8,
+  },
+  yearItem: {
+    width: "31%",
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#eef2f7",
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  yearItemActive: {
+    backgroundColor: "#eef4ff",
+  },
+  yearItemText: {
+    color: "#334155",
+    fontWeight: "600",
+  },
+  yearItemTextActive: {
+    color: "#2563eb",
   },
   inputLabel: {
     color: "#334155",

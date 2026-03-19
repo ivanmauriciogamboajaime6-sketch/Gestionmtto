@@ -29,6 +29,14 @@ type Solicitud = {
   estado?: string;
 };
 
+type Notificacion = {
+  id?: number | string;
+  titulo?: string;
+  mensaje?: string;
+  tipo?: string;
+  leida?: boolean;
+};
+
 type KanbanCard = {
   id: string;
   estado: "diagnostico" | "repuestos" | "intervencion" | "listos";
@@ -144,7 +152,10 @@ export default function TallerDashboard() {
   const isMobile = width < 900;
   const boardColumnWidth = isMobile ? Math.max(width - 72, 260) : 280;
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
+  const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [tallerName, setTallerName] = useState("Taller");
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
 
   const cerrarSesion = async () => {
     try {
@@ -167,6 +178,7 @@ export default function TallerDashboard() {
 
   useEffect(() => {
     cargarSolicitudes();
+    cargarNotificaciones();
   }, []);
 
   const cargarSolicitudes = async () => {
@@ -197,6 +209,23 @@ export default function TallerDashboard() {
     } catch (error) {
       console.log("error cargando solicitudes", error);
       setSolicitudes([]);
+    }
+  };
+
+  const cargarNotificaciones = async () => {
+    try {
+      const token = await storage.getItem("token");
+      const response = await fetch(`${API_BASE_URL}/notificaciones`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json();
+      setNotificaciones(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.log("error cargando notificaciones", error);
+      setNotificaciones([]);
     }
   };
 
@@ -251,6 +280,35 @@ export default function TallerDashboard() {
     { label: "Entregados", value: "7", icon: "check-decagram-outline", color: "#23b26d" },
     { label: "Ingresos", value: "$4.500.000", icon: "cash-multiple", color: "#8e24aa" },
   ];
+  const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+
+  const extraerSolicitudId = (mensaje?: string) => {
+    const match = (mensaje || "").match(/#(\d+)/);
+    return match?.[1] || null;
+  };
+
+  const abrirDesdeNotificacion = async (item: Notificacion) => {
+    try {
+      const token = await storage.getItem("token");
+      await fetch(`${API_BASE_URL}/notificaciones/${item.id}/leer`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+    } catch (error) {
+      console.log("error marcando notificacion taller", error);
+    }
+
+    const solicitudId = extraerSolicitudId(item.mensaje);
+    setHighlightedOrderId(solicitudId);
+    setShowNotifications(false);
+    setNotificaciones((current) =>
+      current.map((notification) =>
+        notification.id === item.id ? { ...notification, leida: true } : notification
+      )
+    );
+  };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
@@ -300,11 +358,38 @@ export default function TallerDashboard() {
               </Text>
             </View>
 
-            <View style={styles.heroBadge}>
-              <MaterialCommunityIcons name="garage-open" size={20} color="#ff8a3d" />
-              <Text style={styles.heroBadgeText}>Operacion en curso</Text>
-            </View>
+            <TouchableOpacity
+              style={styles.bellButton}
+              activeOpacity={0.9}
+              onPress={() => setShowNotifications((current) => !current)}
+            >
+              <MaterialCommunityIcons name="bell-outline" size={24} color="#2563eb" />
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>{unreadNotifications}</Text>
+              </View>
+            </TouchableOpacity>
           </View>
+
+          {showNotifications ? (
+            <View style={styles.notificationsDropdown}>
+              <Text style={styles.notificationsTitle}>Notificaciones</Text>
+              {notificaciones.length > 0 ? (
+                notificaciones.map((item) => (
+                  <TouchableOpacity
+                    key={String(item.id)}
+                    style={styles.notificationItem}
+                    activeOpacity={0.9}
+                    onPress={() => abrirDesdeNotificacion(item)}
+                  >
+                    <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
+                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
+                  </TouchableOpacity>
+                ))
+              ) : (
+                <Text style={styles.emptyColumnText}>No tienes notificaciones nuevas.</Text>
+              )}
+            </View>
+          ) : null}
 
           <View style={styles.quickStats}>
             <StatCard label="Vehiculos hoy" value={String(resumen.vehiculosHoy)} color="#1e88e5" isMobile={isMobile} />
@@ -324,7 +409,13 @@ export default function TallerDashboard() {
               <Text style={styles.emptyColumnText}>No hay solicitudes nuevas en este momento.</Text>
             ) : (
               pendingRequests.map((item, index) => (
-                <View key={String(item.id ?? index)} style={styles.requestCard}>
+                <View
+                  key={String(item.id ?? index)}
+                  style={[
+                    styles.requestCard,
+                    highlightedOrderId === String(item.id) && styles.highlightedRequestCard,
+                  ]}
+                >
                   <Text style={styles.requestOrder}>Orden #{item.id}</Text>
                   <Text style={styles.requestText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
                   <Text style={styles.requestText}>
@@ -378,7 +469,14 @@ export default function TallerDashboard() {
                       <Text style={styles.emptyColumnText}>Sin vehiculos</Text>
                     </View>
                   ) : (
-                    items.map((item) => <KanbanVehicleCard key={item.id} item={item} accent={column.accent} />)
+                    items.map((item) => (
+                      <KanbanVehicleCard
+                        key={item.id}
+                        item={item}
+                        accent={column.accent}
+                        highlighted={highlightedOrderId === String(item.id)}
+                      />
+                    ))
                   )}
                 </View>
               );
@@ -457,12 +555,14 @@ function StatCard({
 function KanbanVehicleCard({
   item,
   accent,
+  highlighted = false,
 }: {
   item: KanbanCard;
   accent: string;
+  highlighted?: boolean;
 }) {
   return (
-    <View style={styles.kanbanCard}>
+    <View style={[styles.kanbanCard, highlighted && styles.highlightedRequestCard]}>
       <View style={[styles.kanbanAccent, { backgroundColor: accent }]} />
       <Text style={styles.vehicleName}>{item.vehiculo}</Text>
       <Text style={styles.plate}>Placa: {item.placa}</Text>
@@ -629,6 +729,62 @@ const styles = StyleSheet.create({
   heroBadgeText: {
     color: "#9b4b14",
     fontWeight: "700",
+  },
+  bellButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "#ffffff",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "#e5ebf5",
+  },
+  notificationBadge: {
+    position: "absolute",
+    top: 6,
+    right: 5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#ff5b2e",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  notificationBadgeText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  notificationsDropdown: {
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+  },
+  notificationsTitle: {
+    color: "#08121f",
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 10,
+  },
+  notificationItem: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    backgroundColor: "#f8fbff",
+    padding: 14,
+    marginTop: 10,
+  },
+  notificationItemTitle: {
+    color: "#08121f",
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  notificationItemText: {
+    color: "#5f6b7c",
+    lineHeight: 20,
   },
   quickStats: {
     flexDirection: "row",
@@ -888,6 +1044,15 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: "#e6edf6",
+  },
+  highlightedRequestCard: {
+    borderColor: "#2563eb",
+    borderWidth: 2,
+    shadowColor: "#2563eb",
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   requestOrder: {
     color: "#08121f",

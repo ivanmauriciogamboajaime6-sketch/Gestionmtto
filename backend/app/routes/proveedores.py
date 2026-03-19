@@ -25,7 +25,8 @@ def register_proveedor(data: UsuarioCreate, db: Session = Depends(get_db)):
         telefono=data.telefono,
         password=hash_password(data.password),
         rol="proveedor",
-        estado="activo"
+        estado="activo",
+        especialidad=(data.especialidad or "").strip().lower() or None,
     )
 
     db.add(usuario)
@@ -45,6 +46,7 @@ def obtener_proveedores(db: Session = Depends(get_db)):
             "email": proveedor.email,
             "telefono": proveedor.telefono,
             "estado": proveedor.estado or "activo",
+            "especialidad": proveedor.especialidad,
         }
         for proveedor in proveedores
     ]

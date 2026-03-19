@@ -20,6 +20,7 @@ def obtener_usuarios(db: Session = Depends(get_db)):
             "telefono": usuario.telefono,
             "rol": usuario.rol,
             "estado": usuario.estado or "activo",
+            "especialidad": usuario.especialidad,
         }
         for usuario in usuarios
     ]
