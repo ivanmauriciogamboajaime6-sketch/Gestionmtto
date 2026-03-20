@@ -15,7 +15,18 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
-import { formatCurrency, formatNumberWithDots } from "../../constants/formatters";
+import { formatCurrency, formatDateTime, formatNumberWithDots } from "../../constants/formatters";
+import {
+  getStatusLabel,
+  isApprovedStatus,
+  isFinishedStatus,
+  isInProcessStatus,
+  isInQuotationStatus,
+  isQuoteWorkflowService,
+  isQuotedStatus,
+  isRejectedProviderStatus,
+  normalizeStatus,
+} from "../../constants/request-status";
 import storage from "../../constants/storage";
 
 type Solicitud = {
@@ -23,6 +34,8 @@ type Solicitud = {
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  fecha?: string | null;
+  fecha_recepcion?: string | null;
   vehiculo?: {
     marca?: string;
     modelo?: string;
@@ -193,16 +206,14 @@ export default function ProviderDashboardScreen() {
   }, [isMobile]);
 
   const cotizaciones = useMemo(
-    () => solicitudes.filter((item) => (item.estado || "").toLowerCase() === "cotizando"),
+    () => solicitudes.filter((item) => isInQuotationStatus(item.estado)),
     [solicitudes]
   );
 
   const pedidos = useMemo(
     () =>
       solicitudes.filter((item) =>
-        ["asignada", "diagnostico", "esperando_repuestos", "en_reparacion", "pruebas"].includes(
-          (item.estado || "").toLowerCase()
-        )
+        isApprovedStatus(item.estado) || isInProcessStatus(item.estado)
       ),
     [solicitudes]
   );
@@ -210,7 +221,7 @@ export default function ProviderDashboardScreen() {
   const entregas = useMemo(
     () =>
       solicitudes.filter((item) =>
-        ["cotizado", "finalizado", "devuelto_proveedor"].includes((item.estado || "").toLowerCase())
+        isQuotedStatus(item.estado) || isFinishedStatus(item.estado) || isRejectedProviderStatus(item.estado)
       ),
     [solicitudes]
   );
@@ -219,6 +230,16 @@ export default function ProviderDashboardScreen() {
     () => notificaciones.filter((item) => !item.leida).length,
     [notificaciones]
   );
+
+  const obtenerTituloSolicitud = (tipoServicio?: string) => {
+    const value = (tipoServicio || "").toLowerCase();
+
+    if (value.includes("llanta")) return "Solicitud de llantas";
+    if (value.includes("bateria")) return "Solicitud de bateria";
+    if (value.includes("aceite") || value.includes("filtro")) return "Solicitud de aceite";
+
+    return tipoServicio || "Solicitud";
+  };
 
   const abrirFormularioCotizacion = (item: Solicitud) => {
     setExpandedQuoteId(String(item.id));
@@ -283,10 +304,10 @@ export default function ProviderDashboardScreen() {
 
     const solicitudId = extraerSolicitudId(item.mensaje);
     const solicitud = solicitudes.find((current) => String(current.id) === String(solicitudId));
-    const estado = (solicitud?.estado || "").toLowerCase();
+    const estado = normalizeStatus(solicitud?.estado);
 
     setShowNotifications(false);
-    setSelectedSection(estado === "cotizado" || estado === "finalizado" ? "Historial" : "Cotizaciones");
+    setSelectedSection(isQuotedStatus(estado) || isFinishedStatus(estado) ? "Historial" : "Cotizaciones");
 
     if (solicitud) {
       abrirFormularioCotizacion(solicitud);
@@ -384,27 +405,68 @@ export default function ProviderDashboardScreen() {
     }
   };
 
-  const renderStatus = (estado?: string) => {
-    const normalized = (estado || "").toLowerCase();
+  const actualizarEstadoPedido = async (
+    solicitudId: string | number | undefined,
+    estado: "en_proceso" | "finalizada",
+    successMessage: string
+  ) => {
+    if (solicitudId == null) return;
 
-    if (normalized === "cotizado") {
+    try {
+      const token = await storage.getItem("token");
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ estado }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Error", data.detail || "No se pudo actualizar el pedido");
+        return;
+      }
+
+      await cargarSolicitudes();
+      Alert.alert("Actualizado", successMessage);
+    } catch (error) {
+      console.log("Error actualizando estado proveedor", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
+  };
+
+  const renderStatus = (estado?: string) => {
+    const normalized = normalizeStatus(estado);
+
+    if (isQuotedStatus(normalized)) {
       return {
-        label: "Cotizado",
+        label: getStatusLabel(normalized),
         containerStyle: styles.statusPillSuccess,
         textStyle: styles.statusTextSuccess,
       };
     }
 
-    if (normalized === "devuelto_proveedor") {
+    if (isRejectedProviderStatus(normalized)) {
       return {
-        label: "Devuelto por el proveedor",
+        label: getStatusLabel(normalized),
         containerStyle: styles.statusPillReturned,
         textStyle: styles.statusTextReturned,
       };
     }
 
+    if (isApprovedStatus(normalized) || isInProcessStatus(normalized)) {
+      return {
+        label: getStatusLabel(normalized),
+        containerStyle: styles.statusPillSuccess,
+        textStyle: styles.statusTextSuccess,
+      };
+    }
+
     return {
-      label: "Cotizacion",
+      label: getStatusLabel(normalized),
       containerStyle: styles.statusPillPending,
       textStyle: styles.statusTextPending,
     };
@@ -519,7 +581,6 @@ export default function ProviderDashboardScreen() {
                     onPress={() => abrirDesdeNotificacion(item)}
                   >
                     <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
-                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
                   </TouchableOpacity>
                 ))
               ) : (
@@ -570,7 +631,7 @@ export default function ProviderDashboardScreen() {
                 cotizaciones.map((item) => {
                   const statusInfo = renderStatus(item.estado);
                   const isExpanded = expandedQuoteId === String(item.id);
-                  const isQuoted = (item.estado || "").toLowerCase() === "cotizado";
+                  const isQuoted = isQuotedStatus(item.estado);
 
                   return (
                     <View key={String(item.id)} style={styles.orderCard}>
@@ -579,7 +640,7 @@ export default function ProviderDashboardScreen() {
                         onPress={() => alternarFormularioCotizacion(item)}
                       >
                         <View style={styles.orderHeader}>
-                          <Text style={styles.orderTitle}>Cotizacion #{item.id}</Text>
+                          <Text style={styles.orderTitle}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
                           <View style={[styles.statusPill, statusInfo.containerStyle]}>
                             <Text style={[styles.statusText, statusInfo.textStyle]}>
                               {statusInfo.label}
@@ -594,8 +655,9 @@ export default function ProviderDashboardScreen() {
                           Vehiculo: {item.vehiculo?.marca || ""} {item.vehiculo?.modelo || ""}
                         </Text>
                         <Text style={styles.orderText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
+                        <Text style={styles.orderText}>Orden #{item.id}</Text>
                         <Text style={styles.orderText}>
-                          Servicio: {item.tipo_servicio || "Sin servicio"}
+                          Fecha y hora de recepcion: {formatDateTime(item.fecha_recepcion || item.fecha)}
                         </Text>
                         <Text style={styles.orderText}>
                           Problema: {item.problema || "Sin descripcion"}
@@ -749,12 +811,46 @@ export default function ProviderDashboardScreen() {
               {pedidos.length > 0 ? (
                 pedidos.map((item) => (
                   <View key={String(item.id)} style={styles.orderCard}>
-                    <Text style={styles.orderTitle}>Pedido #{item.id}</Text>
+                    <View style={styles.orderHeader}>
+                      <Text style={styles.orderTitle}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
+                      <View style={[styles.statusPill, renderStatus(item.estado).containerStyle]}>
+                        <Text style={[styles.statusText, renderStatus(item.estado).textStyle]}>
+                          {renderStatus(item.estado).label}
+                        </Text>
+                      </View>
+                    </View>
                     <Text style={styles.orderText}>Cliente: {item.cliente?.nombre || "Cliente"}</Text>
                     <Text style={styles.orderText}>
                       Vehiculo: {item.vehiculo?.marca || ""} {item.vehiculo?.modelo || ""}
                     </Text>
-                    <Text style={styles.orderText}>Servicio: {item.tipo_servicio || "Sin servicio"}</Text>
+                    <Text style={styles.orderText}>Orden #{item.id}</Text>
+                    <Text style={styles.orderText}>
+                      Fecha y hora de recepcion: {formatDateTime(item.fecha_recepcion || item.fecha)}
+                    </Text>
+                    {isQuoteWorkflowService(item.tipo_servicio) ? (
+                      <View style={styles.actionRow}>
+                        {isApprovedStatus(item.estado) ? (
+                          <TouchableOpacity
+                            style={styles.primaryButton}
+                            onPress={() =>
+                              actualizarEstadoPedido(item.id, "en_proceso", "El pedido paso a en proceso.")
+                            }
+                          >
+                            <Text style={styles.primaryButtonText}>Iniciar trabajo</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        {isInProcessStatus(item.estado) ? (
+                          <TouchableOpacity
+                            style={styles.primaryButton}
+                            onPress={() =>
+                              actualizarEstadoPedido(item.id, "finalizada", "El pedido fue finalizado.")
+                            }
+                          >
+                            <Text style={styles.primaryButtonText}>Finalizar</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    ) : null}
                   </View>
                 ))
               ) : (
@@ -775,7 +871,7 @@ export default function ProviderDashboardScreen() {
                         <View
                           style={[
                             styles.statusPill,
-                            (item.estado || "").toLowerCase() === "devuelto_proveedor"
+                            isRejectedProviderStatus(item.estado)
                               ? styles.statusPillReturned
                               : styles.statusPillSuccess,
                           ]}
@@ -783,16 +879,16 @@ export default function ProviderDashboardScreen() {
                           <Text
                             style={[
                               styles.statusText,
-                              (item.estado || "").toLowerCase() === "devuelto_proveedor"
+                              isRejectedProviderStatus(item.estado)
                                 ? styles.statusTextReturned
                                 : styles.statusTextSuccess,
                             ]}
                           >
-                            {(item.estado || "").toLowerCase() === "cotizado"
-                              ? "Cotizado"
-                              : (item.estado || "").toLowerCase() === "devuelto_proveedor"
-                                ? "Devuelto"
-                                : "Finalizado"}
+                            {isQuotedStatus(item.estado)
+                              ? getStatusLabel(item.estado)
+                              : isRejectedProviderStatus(item.estado)
+                                ? getStatusLabel(item.estado)
+                                : getStatusLabel(item.estado)}
                           </Text>
                         </View>
                       </View>
@@ -1234,6 +1330,12 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 12,
+  },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 12,
   },
   primaryButtonText: {
     color: "#ffffff",

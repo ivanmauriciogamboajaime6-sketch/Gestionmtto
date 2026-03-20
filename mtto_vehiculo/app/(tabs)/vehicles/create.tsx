@@ -94,6 +94,7 @@ export default function CreateVehicle() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
+          tipo_vehiculo: tipoVehiculo,
           marca,
           modelo,
           anio: Number(anio),

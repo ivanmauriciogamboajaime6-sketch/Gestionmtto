@@ -7,6 +7,7 @@ class Vehiculo(Base):
     id = Column(Integer, primary_key=True, index=True)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
 
+    tipo_vehiculo = Column(String)
     marca = Column(String)
     modelo = Column(String)
     anio = Column(Integer)

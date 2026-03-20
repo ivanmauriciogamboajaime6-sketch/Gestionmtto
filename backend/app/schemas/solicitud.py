@@ -15,6 +15,17 @@ class SolicitudCotizacionUpdate(BaseModel):
     proveedor_ids: list[int]
 
 
+class SolicitudTallerUpdate(BaseModel):
+    taller_ids: list[int]
+
+
+class SolicitudDiagnosticoTallerUpdate(BaseModel):
+    diagnostico: str = Field(..., max_length=800)
+    servicios: str = Field(..., max_length=800)
+    horas: str = Field(..., max_length=20)
+    materiales: str = Field(..., max_length=800)
+
+
 class SolicitudRespuestaProveedorUpdate(BaseModel):
     marca: str
     referencia: str
@@ -34,3 +45,4 @@ class SolicitudAdministradorDevolucion(BaseModel):
 
 class SolicitudAdministradorOmitirCotizacion(BaseModel):
     proveedor_id: int | None = None
+    response_index: int | None = None

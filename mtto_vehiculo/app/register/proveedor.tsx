@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
 import storage from "../../constants/storage";
@@ -70,8 +71,9 @@ export default function RegisterProveedor() {
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity onPress={() => router.replace("/select-role")}>
-        <Text style={styles.back}>← Volver</Text>
+      <TouchableOpacity style={styles.backButton} onPress={() => router.replace("/select-role")}>
+        <MaterialCommunityIcons name="arrow-left" size={18} color="#2563eb" />
+        <Text style={styles.back}>Volver</Text>
       </TouchableOpacity>
 
       <Text style={styles.title}>Registro proveedor</Text>
@@ -90,7 +92,8 @@ export default function RegisterProveedor() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: "center", padding: 25 },
-  back: { color: "#2563eb", marginBottom: 20 },
+  backButton: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 20 },
+  back: { color: "#2563eb" },
   title: { fontSize: 26, fontWeight: "bold", marginBottom: 25, textAlign: "center" },
   input: {
     borderWidth: 1,

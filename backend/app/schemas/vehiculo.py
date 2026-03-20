@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 class VehiculoCreate(BaseModel):
+    tipo_vehiculo: str
     marca: str
     modelo: str
     anio: int

@@ -1,6 +1,9 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 from app.database import engine, Base
+from os import getenv
+from dotenv import load_dotenv
+from sqlalchemy import text
 
 from app.routes import auth
 from app.routes import usuarios
@@ -10,14 +13,19 @@ from app.routes import proveedores
 from app.routes import solicitudes
 from app.routes import notificaciones
 
+load_dotenv()
+
 app = FastAPI()
+
+# Configuración CORS - usar variables de entorno en producción
+allowed_origins = getenv("CORS_ORIGINS", "http://localhost:8081").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # en producción se cambia
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 # registrar rutas
 app.include_router(auth.router)
@@ -31,6 +39,12 @@ app.include_router(notificaciones.router)
 
 # crear tablas
 Base.metadata.create_all(bind=engine)
+
+with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS diagnostico_taller TEXT"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS servicios_taller TEXT"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS horas_taller VARCHAR(20)"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS materiales_taller TEXT"))
 
 
 @app.get("/")

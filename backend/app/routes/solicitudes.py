@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ from app.schemas.solicitud import (
     SolicitudAdministradorDevolucion,
     SolicitudCotizacionUpdate,
     SolicitudCreate,
+    SolicitudDiagnosticoTallerUpdate,
+    SolicitudTallerUpdate,
     SolicitudProveedorDevolucion,
     SolicitudEstadoUpdate,
     SolicitudRespuestaProveedorUpdate,
@@ -22,7 +25,26 @@ from app.schemas.solicitud import (
 router = APIRouter()
 
 ESTADOS_VALIDOS = {
+    "creada",
+    "en_revision",
+    "en_diagnostico",
+    "diagnosticada",
+    "en_cotizacion",
+    "cotizada",
+    "propuesta_armada",
+    "enviada_cliente",
+    "aprobada",
+    "rechazada_admin",
+    "rechazada_taller",
+    "rechazada_proveedor",
+    "rechazada_cliente",
+    "cancelada",
     "pendiente",
+    "recibida",
+    "en_diagnostico",
+    "pendiente_aprobacion_admin",
+    "aprobada",
+    "en_proceso",
     "cotizando",
     "archivada",
     "devuelta",
@@ -36,8 +58,44 @@ ESTADOS_VALIDOS = {
     "cotizado",
     "devuelto_proveedor",
     "finalizado",
+    "finalizada",
     "rechazada",
 }
+
+
+ESTADOS_COTIZACION_PROVEEDOR = {"pendiente", "cotizado", "devuelto"}
+
+
+def normalizar_servicio(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def es_servicio_cotizable(tipo_servicio: str | None) -> bool:
+    servicio = normalizar_servicio(tipo_servicio)
+    return any(
+        keyword in servicio
+        for keyword in ["bateria", "aceite", "filtro", "freno", "llanta"]
+    )
+
+
+def es_solicitud_mantenimiento_taller(tipo_servicio: str | None) -> bool:
+    servicio = normalizar_servicio(tipo_servicio)
+    if not servicio:
+        return False
+
+    return (
+        es_servicio_cotizable(servicio)
+        and (
+            ":" in servicio
+            or "," in servicio
+            or "mantenimiento" in servicio
+            or "diagnostico" in servicio
+            or "escaneo" in servicio
+            or "motor" in servicio
+            or "suspension" in servicio
+            or "alineacion" in servicio
+        )
+    )
 
 
 def parse_proveedores_ids(raw_value: str | None) -> list[int]:
@@ -132,14 +190,30 @@ def rebuild_cotizacion_desde_estados(solicitud: Solicitud, proveedores_estado: l
     )
 
 
-def resolve_estado_desde_proveedores(proveedores_estado: list[dict]) -> str:
+def resolve_estado_desde_proveedores(
+    proveedores_estado: list[dict],
+    tipo_servicio: str | None = None,
+) -> str:
+    if es_solicitud_mantenimiento_taller(tipo_servicio):
+        if any(item.get("estado") == "pendiente" for item in proveedores_estado):
+            return "en_cotizacion"
+        if any(item.get("estado") == "cotizado" for item in proveedores_estado):
+            return "cotizada"
+        if any(item.get("estado") == "devuelto" for item in proveedores_estado):
+            return "rechazada_proveedor"
+        return "diagnosticada"
+
     if any(item.get("estado") == "pendiente" for item in proveedores_estado):
-        return "cotizando"
+        return "en_cotizacion" if es_servicio_cotizable(tipo_servicio) else "cotizando"
     if any(item.get("estado") == "cotizado" for item in proveedores_estado):
-        return "cotizado"
+        return "cotizada" if es_servicio_cotizable(tipo_servicio) else "cotizado"
     if any(item.get("estado") == "devuelto" for item in proveedores_estado):
-        return "devuelto_proveedor"
-    return "pendiente"
+        return (
+            "rechazada_proveedor"
+            if es_servicio_cotizable(tipo_servicio)
+            else "devuelto_proveedor"
+        )
+    return "en_revision" if es_servicio_cotizable(tipo_servicio) else "pendiente"
 
 
 def hydrate_respuestas_desde_campos(
@@ -159,24 +233,104 @@ def hydrate_respuestas_desde_campos(
     ]
 
     for index, proveedor in enumerate(cotizados):
-        respuestas.append(
-            {
-                "proveedor_id": proveedor.get("id"),
-                "proveedor_nombre": proveedor.get("nombre"),
-                "marca": proveedor.get("marca") or (marcas[index] if index < len(marcas) else None),
-                "referencia": proveedor.get("referencia") or (referencias[index] if index < len(referencias) else None),
-                "garantia": proveedor.get("garantia") or (garantias[index] if index < len(garantias) else None),
-                "disponibilidad": proveedor.get("disponibilidad") or (
-                    disponibilidades[index] if index < len(disponibilidades) else None
-                ),
-                "precio": proveedor.get("precio") or (precios[index] if index < len(precios) else None),
-                "observacion": proveedor.get("observacion") or (
-                    observaciones[index] if index < len(observaciones) else None
-                ),
-            }
+        proveedor_marcas = parse_multi_value(proveedor.get("marca")) or [
+            proveedor.get("marca") or (marcas[index] if index < len(marcas) else None)
+        ]
+        proveedor_referencias = parse_multi_value(proveedor.get("referencia")) or [
+            proveedor.get("referencia") or (referencias[index] if index < len(referencias) else None)
+        ]
+        proveedor_garantias = parse_multi_value(proveedor.get("garantia")) or [
+            proveedor.get("garantia") or (garantias[index] if index < len(garantias) else None)
+        ]
+        proveedor_disponibilidades = parse_multi_value(proveedor.get("disponibilidad")) or [
+            proveedor.get("disponibilidad") or (
+                disponibilidades[index] if index < len(disponibilidades) else None
+            )
+        ]
+        proveedor_precios = parse_multi_value(proveedor.get("precio")) or [
+            proveedor.get("precio") or (precios[index] if index < len(precios) else None)
+        ]
+        proveedor_observaciones = parse_multi_value(proveedor.get("observacion")) or [
+            proveedor.get("observacion") or (observaciones[index] if index < len(observaciones) else None)
+        ]
+
+        total_formularios = max(
+            len(proveedor_marcas),
+            len(proveedor_referencias),
+            len(proveedor_garantias),
+            len(proveedor_disponibilidades),
+            len(proveedor_precios),
+            len(proveedor_observaciones),
         )
 
+        for formulario_index in range(total_formularios):
+            respuestas.append(
+                {
+                    "proveedor_id": proveedor.get("id"),
+                    "proveedor_nombre": proveedor.get("nombre"),
+                    "response_index": formulario_index,
+                    "marca": proveedor_marcas[formulario_index] if formulario_index < len(proveedor_marcas) else None,
+                    "referencia": proveedor_referencias[formulario_index] if formulario_index < len(proveedor_referencias) else None,
+                    "garantia": proveedor_garantias[formulario_index] if formulario_index < len(proveedor_garantias) else None,
+                    "disponibilidad": proveedor_disponibilidades[formulario_index] if formulario_index < len(proveedor_disponibilidades) else None,
+                    "precio": proveedor_precios[formulario_index] if formulario_index < len(proveedor_precios) else None,
+                    "observacion": proveedor_observaciones[formulario_index] if formulario_index < len(proveedor_observaciones) else None,
+                }
+            )
+
     return respuestas
+
+
+def extraer_formularios_proveedor(proveedor: dict) -> list[dict]:
+    marcas = parse_multi_value(proveedor.get("marca")) or [proveedor.get("marca")]
+    referencias = parse_multi_value(proveedor.get("referencia")) or [proveedor.get("referencia")]
+    garantias = parse_multi_value(proveedor.get("garantia")) or [proveedor.get("garantia")]
+    disponibilidades = parse_multi_value(proveedor.get("disponibilidad")) or [proveedor.get("disponibilidad")]
+    precios = parse_multi_value(proveedor.get("precio")) or [proveedor.get("precio")]
+    observaciones = parse_multi_value(proveedor.get("observacion")) or [proveedor.get("observacion")]
+
+    total = max(
+        len(marcas),
+        len(referencias),
+        len(garantias),
+        len(disponibilidades),
+        len(precios),
+        len(observaciones),
+    )
+
+    return [
+        {
+            "marca": marcas[index] if index < len(marcas) else None,
+            "referencia": referencias[index] if index < len(referencias) else None,
+            "garantia": garantias[index] if index < len(garantias) else None,
+            "disponibilidad": disponibilidades[index] if index < len(disponibilidades) else None,
+            "precio": precios[index] if index < len(precios) else None,
+            "observacion": observaciones[index] if index < len(observaciones) else None,
+        }
+        for index in range(total)
+    ]
+
+
+def actualizar_proveedor_desde_formularios(proveedor: dict, formularios: list[dict]) -> dict:
+    proveedor["marca"] = " | ".join(
+        [str(item.get("marca") or "").strip() for item in formularios if str(item.get("marca") or "").strip()]
+    ) or None
+    proveedor["referencia"] = " | ".join(
+        [str(item.get("referencia") or "").strip() for item in formularios if str(item.get("referencia") or "").strip()]
+    ) or None
+    proveedor["garantia"] = " | ".join(
+        [str(item.get("garantia") or "").strip() for item in formularios if str(item.get("garantia") or "").strip()]
+    ) or None
+    proveedor["disponibilidad"] = " | ".join(
+        [str(item.get("disponibilidad") or "").strip() for item in formularios if str(item.get("disponibilidad") or "").strip()]
+    ) or None
+    proveedor["precio"] = " | ".join(
+        [str(item.get("precio") or "").strip() for item in formularios if str(item.get("precio") or "").strip()]
+    ) or None
+    proveedor["observacion"] = " | ".join(
+        [str(item.get("observacion") or "").strip() for item in formularios if str(item.get("observacion") or "").strip()]
+    ) or None
+    return proveedor
 
 
 @router.post("/solicitudes")
@@ -198,7 +352,7 @@ def crear_solicitud(
         vehiculo_id=data.vehiculo_id,
         tipo=data.tipo,
         descripcion=data.descripcion,
-        estado="pendiente",
+        estado="creada" if es_servicio_cotizable(data.tipo) else "pendiente",
     )
 
     db.add(solicitud)
@@ -210,7 +364,7 @@ def crear_solicitud(
         crear_notificacion(
             db,
             administrador.id,
-            "Nueva solicitud",
+            f"Solicitud #{solicitud.id} nueva",
             f"El cliente {user['nombre']} creo la solicitud #{solicitud.id}.",
             "solicitud_cliente",
         )
@@ -224,18 +378,34 @@ def obtener_solicitudes(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # Optimización: Pre-cargar todos los vehículos y usuarios para evitar N+1 queries
     solicitudes = db.query(Solicitud).all()
+    
+    # Recopilar IDs necesarios
+    vehiculo_ids = [s.vehiculo_id for s in solicitudes if s.vehiculo_id]
+    usuario_ids = {
+        s.usuario_id for s in solicitudes if s.usuario_id
+    }
+    for solicitud in solicitudes:
+        usuario_ids.update(parse_proveedores_ids(solicitud.proveedores_ids))
+    
+    # Cargar en batch para evitar N+1
+    vehiculos_map = {v.id: v for v in db.query(Vehiculo).filter(Vehiculo.id.in_(vehiculo_ids)).all()} if vehiculo_ids else {}
+    usuarios_map = (
+        {u.id: u for u in db.query(Usuario).filter(Usuario.id.in_(usuario_ids)).all()}
+        if usuario_ids
+        else {}
+    )
+    
     resultado = []
 
     for solicitud in solicitudes:
-      vehiculo = db.query(Vehiculo).filter(Vehiculo.id == solicitud.vehiculo_id).first()
-      cliente = db.query(Usuario).filter(Usuario.id == solicitud.usuario_id).first()
+      vehiculo = vehiculos_map.get(solicitud.vehiculo_id)
+      cliente = usuarios_map.get(solicitud.usuario_id)
+      # Reutilizar usuarios_map para proveedores (evitar query adicional)
       proveedores_ids = parse_proveedores_ids(solicitud.proveedores_ids)
-      proveedores = (
-          db.query(Usuario).filter(Usuario.id.in_(proveedores_ids)).all()
-          if proveedores_ids
-          else []
-      )
+      proveedores = [usuarios_map.get(pid) for pid in proveedores_ids if pid in usuarios_map]
+      proveedores = [p for p in proveedores if p is not None]
       marcas = parse_multi_value(solicitud.marca)
       referencias = parse_multi_value(solicitud.referencia)
       garantias = parse_multi_value(solicitud.garantia)
@@ -243,6 +413,17 @@ def obtener_solicitudes(
       precios = parse_multi_value(solicitud.precio)
       observaciones = parse_multi_value(solicitud.observacion)
       proveedores_estado = parse_proveedores_estado(solicitud.proveedores_estado)
+      fecha_recepcion = None
+      if user["rol"] == "proveedor":
+          proveedor_actual = next(
+              (
+                  proveedor
+                  for proveedor in proveedores_estado
+                  if str(proveedor.get("id")) == str(user["id"])
+              ),
+              None,
+          )
+          fecha_recepcion = proveedor_actual.get("fecha_recepcion") if proveedor_actual else None
       respuestas_por_proveedor = hydrate_respuestas_desde_campos(
           proveedores_estado,
           marcas,
@@ -260,6 +441,8 @@ def obtener_solicitudes(
           continue
       if user["rol"] == "proveedor" and user["id"] not in proveedores_ids:
           continue
+      if user["rol"] == "taller" and user["id"] not in proveedores_ids:
+          continue
 
       resultado.append(
           {
@@ -267,6 +450,8 @@ def obtener_solicitudes(
               "tipo_servicio": solicitud.tipo,
               "problema": solicitud.descripcion,
               "estado": solicitud.estado,
+              "fecha": solicitud.fecha.isoformat() if solicitud.fecha else None,
+              "fecha_recepcion": fecha_recepcion,
               "vehiculo": {
                   "id": vehiculo.id if vehiculo else None,
                   "marca": vehiculo.marca if vehiculo else None,
@@ -300,6 +485,7 @@ def obtener_solicitudes(
                       {
                           "proveedor_id": None,
                           "proveedor_nombre": None,
+                          "response_index": index,
                           "marca": marcas[index] if index < len(marcas) else None,
                           "referencia": referencias[index] if index < len(referencias) else None,
                           "garantia": garantias[index] if index < len(garantias) else None,
@@ -319,6 +505,12 @@ def obtener_solicitudes(
                       )
                   ],
               },
+              "taller_diagnostico": {
+                  "diagnostico": solicitud.diagnostico_taller,
+                  "servicios": solicitud.servicios_taller,
+                  "horas": solicitud.horas_taller,
+                  "materiales": solicitud.materiales_taller,
+              },
           }
       )
 
@@ -332,8 +524,11 @@ def actualizar_estado_solicitud(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    if user["rol"] != "taller":
-        raise HTTPException(status_code=403, detail="Solo el taller puede actualizar solicitudes")
+    if user["rol"] not in {"taller", "proveedor"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el taller o el proveedor pueden actualizar solicitudes",
+        )
 
     if data.estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail="Estado no valido")
@@ -343,11 +538,128 @@ def actualizar_estado_solicitud(
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
+    if user["rol"] == "proveedor":
+        if not es_servicio_cotizable(solicitud.tipo):
+            raise HTTPException(
+                status_code=403,
+                detail="El proveedor solo puede actualizar servicios cotizables",
+            )
+
+        proveedores_ids = parse_proveedores_ids(solicitud.proveedores_ids)
+        proveedor_asignado = (
+            user["id"] in proveedores_ids
+            or str(user["id"]) == str(solicitud.proveedor_cotizo_id)
+        )
+
+        if not proveedor_asignado:
+            raise HTTPException(
+                status_code=403,
+                detail="Esta solicitud no fue aprobada para este proveedor",
+            )
+
+        if data.estado not in {"en_proceso", "finalizada"}:
+            raise HTTPException(
+                status_code=403,
+                detail="El proveedor solo puede mover a en_proceso o finalizada",
+            )
+
+    if user["rol"] == "taller":
+        if user["id"] not in parse_proveedores_ids(solicitud.proveedores_ids):
+            raise HTTPException(
+                status_code=403,
+                detail="Esta solicitud no fue asignada a este taller",
+            )
+
+        estados_validos_taller = {
+            "en_diagnostico",
+            "diagnosticada",
+            "en_proceso",
+            "finalizada",
+            "rechazada_taller",
+        }
+        if data.estado not in estados_validos_taller:
+            raise HTTPException(
+                status_code=403,
+                detail="El taller solo puede mover solicitudes del flujo de taller",
+            )
+
     solicitud.estado = data.estado
+
+    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
+    if user["rol"] == "taller" and data.estado == "diagnosticada":
+        for administrador in administradores:
+            crear_notificacion(
+                db,
+                administrador.id,
+                f"Solicitud #{solicitud.id} diagnosticada",
+                f"El taller {user['nombre']} envio el diagnostico de la solicitud #{solicitud.id}.",
+                "diagnostico_taller",
+            )
+    if user["rol"] == "taller" and data.estado == "rechazada_taller":
+        for administrador in administradores:
+            crear_notificacion(
+                db,
+                administrador.id,
+                f"Solicitud #{solicitud.id} rechazada por taller",
+                f"El taller {user['nombre']} devolvio la solicitud #{solicitud.id}.",
+                "rechazo_taller",
+            )
+
     db.commit()
     db.refresh(solicitud)
 
     return {"mensaje": "estado actualizado", "id": solicitud.id, "estado": solicitud.estado}
+
+
+@router.patch("/solicitudes/{solicitud_id}/diagnostico-taller")
+def enviar_diagnostico_taller(
+    solicitud_id: int,
+    data: SolicitudDiagnosticoTallerUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["rol"] != "taller":
+        raise HTTPException(status_code=403, detail="Solo el taller puede enviar diagnosticos")
+
+    solicitud = db.query(Solicitud).filter(Solicitud.id == solicitud_id).first()
+
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    if user["id"] not in parse_proveedores_ids(solicitud.proveedores_ids):
+        raise HTTPException(status_code=403, detail="Esta solicitud no fue asignada a este taller")
+
+    horas = data.horas.strip()
+    if not horas:
+        raise HTTPException(status_code=400, detail="Debes indicar las horas estimadas")
+
+    if len(horas) > 20:
+        raise HTTPException(status_code=400, detail="El formato de horas no es valido")
+
+    solicitud.diagnostico_taller = data.diagnostico.strip()
+    solicitud.servicios_taller = data.servicios.strip()
+    solicitud.horas_taller = horas
+    solicitud.materiales_taller = data.materiales.strip()
+    solicitud.estado = "diagnosticada"
+
+    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
+    for administrador in administradores:
+        crear_notificacion(
+            db,
+            administrador.id,
+            f"Solicitud #{solicitud.id} diagnosticada",
+            f"El taller {user['nombre']} envio cotizacion y diagnostico para la solicitud #{solicitud.id}.",
+            "diagnostico_taller",
+        )
+
+    db.commit()
+    db.refresh(solicitud)
+
+    return {
+        "mensaje": "diagnostico enviado al administrador",
+        "id": solicitud.id,
+        "estado": solicitud.estado,
+    }
 
 
 @router.patch("/solicitudes/{solicitud_id}/cotizar")
@@ -375,6 +687,7 @@ def enviar_a_proveedores(
         raise HTTPException(status_code=400, detail="Debes seleccionar al menos un proveedor valido")
 
     solicitud.proveedores_ids = ",".join(str(proveedor.id) for proveedor in proveedores)
+    fecha_recepcion = datetime.now(timezone.utc).isoformat()
     solicitud.proveedores_estado = dump_proveedores_estado(
         [
             {
@@ -382,16 +695,17 @@ def enviar_a_proveedores(
                 "nombre": proveedor.nombre,
                 "email": proveedor.email,
                 "estado": "pendiente",
+                "fecha_recepcion": fecha_recepcion,
             }
             for proveedor in proveedores
         ]
     )
-    solicitud.estado = "cotizando"
+    solicitud.estado = "en_cotizacion" if es_servicio_cotizable(solicitud.tipo) else "cotizando"
     for proveedor in proveedores:
         crear_notificacion(
             db,
             proveedor.id,
-            "Nueva cotizacion",
+            f"Cotizacion #{solicitud.id} nueva",
             f"El administrador te envio la solicitud #{solicitud.id} para cotizar.",
             "solicitud_proveedor",
         )
@@ -403,6 +717,58 @@ def enviar_a_proveedores(
         "id": solicitud.id,
         "estado": solicitud.estado,
         "proveedor_ids": [proveedor.id for proveedor in proveedores],
+    }
+
+
+@router.patch("/solicitudes/{solicitud_id}/enviar-taller")
+def enviar_a_talleres(
+    solicitud_id: int,
+    data: SolicitudTallerUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["rol"] != "administrador":
+        raise HTTPException(status_code=403, detail="Solo el administrador puede enviar al taller")
+
+    solicitud = db.query(Solicitud).filter(Solicitud.id == solicitud_id).first()
+
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    talleres = (
+        db.query(Usuario)
+        .filter(Usuario.id.in_(data.taller_ids), Usuario.rol == "taller")
+        .all()
+    )
+
+    if not talleres:
+        raise HTTPException(status_code=400, detail="Debes seleccionar al menos un taller valido")
+
+    solicitud.proveedores_ids = ",".join(str(taller.id) for taller in talleres)
+    solicitud.proveedores_estado = None
+    solicitud.estado = (
+        "en_diagnostico"
+        if es_solicitud_mantenimiento_taller(solicitud.tipo)
+        else "recibida"
+    )
+
+    for taller in talleres:
+        crear_notificacion(
+            db,
+            taller.id,
+            f"Solicitud #{solicitud.id} nueva",
+            f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.",
+            "solicitud_taller",
+        )
+
+    db.commit()
+    db.refresh(solicitud)
+
+    return {
+        "mensaje": "solicitud enviada a talleres",
+        "id": solicitud.id,
+        "estado": solicitud.estado,
+        "taller_ids": [taller.id for taller in talleres],
     }
 
 
@@ -420,11 +786,11 @@ def archivar_solicitud(
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
-    solicitud.estado = "archivada"
+    solicitud.estado = "cancelada" if es_servicio_cotizable(solicitud.tipo) else "archivada"
     crear_notificacion(
         db,
         solicitud.usuario_id,
-        "Solicitud descartada",
+        f"Solicitud #{solicitud.id} descartada",
         "Tu solicitud fue descartada. Si quieres, puedes volver a solicitar.",
         "solicitud_descartada",
     )
@@ -437,6 +803,7 @@ def archivar_solicitud(
 @router.patch("/solicitudes/{solicitud_id}/enviar-cliente")
 def enviar_solicitud_cliente(
     solicitud_id: int,
+    data: SolicitudAdministradorOmitirCotizacion | None = None,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -448,11 +815,115 @@ def enviar_solicitud_cliente(
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
-    solicitud.estado = "enviado_cliente"
+    proveedores_estado = parse_proveedores_estado(solicitud.proveedores_estado)
+
+    if data and data.proveedor_id is not None:
+        proveedor_enviado = next(
+            (
+                proveedor
+                for proveedor in proveedores_estado
+                if str(proveedor.get("id")) == str(data.proveedor_id)
+                and proveedor.get("estado") == "cotizado"
+            ),
+            None,
+        )
+
+        if not proveedor_enviado:
+            raise HTTPException(status_code=404, detail="Cotizacion del proveedor no encontrada")
+
+        formularios = extraer_formularios_proveedor(proveedor_enviado)
+        response_index = data.response_index or 0
+
+        if response_index < 0 or response_index >= len(formularios):
+            raise HTTPException(status_code=404, detail="Formulario de cotizacion no encontrado")
+
+        formulario_enviado = formularios[response_index]
+
+        solicitud_cliente = Solicitud(
+            usuario_id=solicitud.usuario_id,
+            vehiculo_id=solicitud.vehiculo_id,
+            tipo=solicitud.tipo,
+            descripcion=solicitud.descripcion,
+            estado="enviada_cliente" if es_servicio_cotizable(solicitud.tipo) else "enviado_cliente",
+            proveedores_ids=str(proveedor_enviado.get("id")) if proveedor_enviado.get("id") else None,
+            proveedores_estado=dump_proveedores_estado([proveedor_enviado]),
+            proveedor_cotizo_id=proveedor_enviado.get("id"),
+            marca=normalizar_texto_guardado(formulario_enviado.get("marca")),
+            referencia=normalizar_texto_guardado(formulario_enviado.get("referencia")),
+            garantia=normalizar_texto_guardado(formulario_enviado.get("garantia")),
+            disponibilidad=normalizar_texto_guardado(formulario_enviado.get("disponibilidad")),
+            precio=normalizar_texto_guardado(formulario_enviado.get("precio")),
+            observacion=normalizar_texto_guardado(formulario_enviado.get("observacion")),
+            diagnostico_taller=solicitud.diagnostico_taller,
+            servicios_taller=solicitud.servicios_taller,
+            horas_taller=solicitud.horas_taller,
+            materiales_taller=solicitud.materiales_taller,
+        )
+        db.add(solicitud_cliente)
+
+        formularios_restantes = [
+            formulario
+            for index, formulario in enumerate(formularios)
+            if index != response_index
+        ]
+        if formularios_restantes:
+            for index, proveedor in enumerate(proveedores_estado):
+                if str(proveedor.get("id")) == str(data.proveedor_id):
+                    proveedores_estado[index] = actualizar_proveedor_desde_formularios(
+                        proveedor,
+                        formularios_restantes,
+                    )
+                    break
+        else:
+            proveedores_estado = [
+                proveedor
+                for proveedor in proveedores_estado
+                if str(proveedor.get("id")) != str(data.proveedor_id)
+            ]
+        solicitud.proveedores_estado = (
+            dump_proveedores_estado(proveedores_estado) if proveedores_estado else None
+        )
+        rebuild_cotizacion_desde_estados(solicitud, proveedores_estado)
+        solicitud.estado = (
+            "propuesta_armada"
+            if es_solicitud_mantenimiento_taller(solicitud.tipo)
+            else resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
+        )
+    else:
+        if es_solicitud_mantenimiento_taller(solicitud.tipo):
+            solicitud_cliente = Solicitud(
+                usuario_id=solicitud.usuario_id,
+                vehiculo_id=solicitud.vehiculo_id,
+                tipo=solicitud.tipo,
+                descripcion=solicitud.descripcion,
+                estado="enviada_cliente",
+                proveedores_ids=solicitud.proveedores_ids,
+                proveedores_estado=solicitud.proveedores_estado,
+                proveedor_cotizo_id=solicitud.proveedor_cotizo_id,
+                marca=solicitud.marca,
+                referencia=solicitud.referencia,
+                garantia=solicitud.garantia,
+                disponibilidad=solicitud.disponibilidad,
+                precio=solicitud.precio,
+                observacion=solicitud.observacion,
+                diagnostico_taller=solicitud.diagnostico_taller,
+                servicios_taller=solicitud.servicios_taller,
+                horas_taller=solicitud.horas_taller,
+                materiales_taller=solicitud.materiales_taller,
+            )
+            db.add(solicitud_cliente)
+            solicitud.estado = "propuesta_armada"
+        else:
+            solicitud.estado = (
+                "enviada_cliente"
+                if es_servicio_cotizable(solicitud.tipo)
+                else "enviado_cliente"
+            )
+
     crear_notificacion(
         db,
         solicitud.usuario_id,
-        "Cotizacion disponible",
+        f"Cotizacion #{solicitud.id} disponible",
         f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
         "cotizacion_cliente",
     )
@@ -493,6 +964,14 @@ def omitir_solicitud_cliente(
         if not proveedor_omitido:
             raise HTTPException(status_code=404, detail="Cotizacion del proveedor no encontrada")
 
+        formularios = extraer_formularios_proveedor(proveedor_omitido)
+        response_index = data.response_index or 0
+
+        if response_index < 0 or response_index >= len(formularios):
+            raise HTTPException(status_code=404, detail="Formulario de cotizacion no encontrado")
+
+        formulario_omitido = formularios[response_index]
+
         historial_admin = Solicitud(
             usuario_id=solicitud.usuario_id,
             vehiculo_id=solicitud.vehiculo_id,
@@ -501,25 +980,43 @@ def omitir_solicitud_cliente(
             estado="omitida_admin",
             proveedores_estado=dump_proveedores_estado([proveedor_omitido]),
             proveedor_cotizo_id=proveedor_omitido.get("id"),
-            marca=normalizar_texto_guardado(proveedor_omitido.get("marca")),
-            referencia=normalizar_texto_guardado(proveedor_omitido.get("referencia")),
-            garantia=normalizar_texto_guardado(proveedor_omitido.get("garantia")),
-            disponibilidad=normalizar_texto_guardado(proveedor_omitido.get("disponibilidad")),
-            precio=normalizar_texto_guardado(proveedor_omitido.get("precio")),
-            observacion=normalizar_texto_guardado(proveedor_omitido.get("observacion")),
+            marca=normalizar_texto_guardado(formulario_omitido.get("marca")),
+            referencia=normalizar_texto_guardado(formulario_omitido.get("referencia")),
+            garantia=normalizar_texto_guardado(formulario_omitido.get("garantia")),
+            disponibilidad=normalizar_texto_guardado(formulario_omitido.get("disponibilidad")),
+            precio=normalizar_texto_guardado(formulario_omitido.get("precio")),
+            observacion=normalizar_texto_guardado(formulario_omitido.get("observacion")),
+            diagnostico_taller=solicitud.diagnostico_taller,
+            servicios_taller=solicitud.servicios_taller,
+            horas_taller=solicitud.horas_taller,
+            materiales_taller=solicitud.materiales_taller,
         )
         db.add(historial_admin)
 
-        proveedores_estado = [
-            proveedor
-            for proveedor in proveedores_estado
-            if str(proveedor.get("id")) != str(data.proveedor_id)
+        formularios_restantes = [
+            formulario
+            for index, formulario in enumerate(formularios)
+            if index != response_index
         ]
+        if formularios_restantes:
+            for index, proveedor in enumerate(proveedores_estado):
+                if str(proveedor.get("id")) == str(data.proveedor_id):
+                    proveedores_estado[index] = actualizar_proveedor_desde_formularios(
+                        proveedor,
+                        formularios_restantes,
+                    )
+                    break
+        else:
+            proveedores_estado = [
+                proveedor
+                for proveedor in proveedores_estado
+                if str(proveedor.get("id")) != str(data.proveedor_id)
+            ]
         solicitud.proveedores_estado = (
             dump_proveedores_estado(proveedores_estado) if proveedores_estado else None
         )
         rebuild_cotizacion_desde_estados(solicitud, proveedores_estado)
-        solicitud.estado = resolve_estado_desde_proveedores(proveedores_estado)
+        solicitud.estado = resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
     else:
         historial_admin = Solicitud(
             usuario_id=solicitud.usuario_id,
@@ -536,10 +1033,20 @@ def omitir_solicitud_cliente(
             disponibilidad=solicitud.disponibilidad,
             precio=solicitud.precio,
             observacion=solicitud.observacion,
+            diagnostico_taller=solicitud.diagnostico_taller,
+            servicios_taller=solicitud.servicios_taller,
+            horas_taller=solicitud.horas_taller,
+            materiales_taller=solicitud.materiales_taller,
         )
         db.add(historial_admin)
 
-        solicitud.estado = "pendiente"
+        solicitud.estado = (
+            "diagnosticada"
+            if es_solicitud_mantenimiento_taller(solicitud.tipo)
+            else "en_revision"
+            if es_servicio_cotizable(solicitud.tipo)
+            else "pendiente"
+        )
         solicitud.proveedores_ids = None
         solicitud.proveedores_estado = None
         solicitud.proveedor_cotizo_id = None
@@ -555,7 +1062,7 @@ def omitir_solicitud_cliente(
         crear_notificacion(
             db,
             administrador.id,
-            "Solicitud omitida",
+            f"Solicitud #{solicitud.id} omitida",
             f"La solicitud #{solicitud.id} guardo una cotizacion en historial administrativo.",
             "solicitud_omitida_admin",
         )
@@ -601,15 +1108,22 @@ def responder_cotizacion_proveedor(
             proveedor["disponibilidad"] = data.disponibilidad.strip()
             proveedor["precio"] = data.precio.strip()
             proveedor["observacion"] = data.observacion.strip()
+            proveedor["fecha_recepcion"] = proveedor.get("fecha_recepcion") or (
+                datetime.now(timezone.utc).isoformat()
+            )
     solicitud.proveedores_estado = dump_proveedores_estado(proveedores_estado)
     rebuild_cotizacion_desde_estados(solicitud, proveedores_estado)
-    solicitud.estado = "cotizando" if proveedores_restantes else resolve_estado_desde_proveedores(proveedores_estado)
+    solicitud.estado = (
+        "en_cotizacion" if proveedores_restantes and es_servicio_cotizable(solicitud.tipo)
+        else "cotizando" if proveedores_restantes
+        else resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
+    )
     administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
     for administrador in administradores:
         crear_notificacion(
             db,
             administrador.id,
-            "Cotizacion recibida",
+            f"Cotizacion #{solicitud.id} recibida",
             f"El proveedor {user['nombre']} respondio la solicitud #{solicitud.id}.",
             "respuesta_proveedor",
         )
@@ -653,10 +1167,10 @@ def devolver_solicitud_proveedor(
     rebuild_cotizacion_desde_estados(solicitud, proveedores_estado)
 
     if proveedores_restantes:
-        solicitud.estado = "cotizando"
+        solicitud.estado = "en_cotizacion" if es_servicio_cotizable(solicitud.tipo) else "cotizando"
     else:
-        solicitud.estado = resolve_estado_desde_proveedores(proveedores_estado)
-        if solicitud.estado == "devuelto_proveedor":
+        solicitud.estado = resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
+        if solicitud.estado in {"devuelto_proveedor", "rechazada_proveedor"}:
             solicitud.observacion = data.comentario.strip()
 
     administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
@@ -664,7 +1178,7 @@ def devolver_solicitud_proveedor(
         crear_notificacion(
             db,
             administrador.id,
-            "Solicitud devuelta por proveedor",
+            f"Solicitud #{solicitud.id} devuelta por proveedor",
             f"Se ha devuelto tu solicitud #{solicitud.id} con el comentario: {data.comentario.strip()}",
             "devolucion_proveedor",
         )
@@ -694,13 +1208,19 @@ def devolver_solicitud_cliente(
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
-    solicitud.estado = "devuelta"
+    solicitud.estado = (
+        "rechazada_admin"
+        if es_solicitud_mantenimiento_taller(solicitud.tipo)
+        else "rechazada_cliente"
+        if es_servicio_cotizable(solicitud.tipo)
+        else "devuelta"
+    )
     solicitud.observacion = data.comentario.strip()
 
     crear_notificacion(
         db,
         solicitud.usuario_id,
-        "Solicitud devuelta al cliente",
+        f"Solicitud #{solicitud.id} devuelta al cliente",
         f"Tu solicitud #{solicitud.id} fue devuelta con el comentario: {data.comentario.strip()}",
         "devolucion_cliente",
     )
@@ -710,6 +1230,68 @@ def devolver_solicitud_cliente(
 
     return {
         "mensaje": "solicitud devuelta al cliente",
+        "id": solicitud.id,
+        "estado": solicitud.estado,
+    }
+
+
+@router.patch("/solicitudes/{solicitud_id}/aprobar-cliente")
+def aprobar_solicitud_cliente(
+    solicitud_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["rol"] != "cliente":
+        raise HTTPException(status_code=403, detail="Solo el cliente puede aprobar solicitudes")
+
+    solicitud = (
+        db.query(Solicitud)
+        .filter(Solicitud.id == solicitud_id, Solicitud.usuario_id == user["id"])
+        .first()
+    )
+
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    estados_validos_cliente = {"enviada_cliente", "enviado_cliente"}
+    if solicitud.estado not in estados_validos_cliente:
+        raise HTTPException(status_code=400, detail="La solicitud no esta disponible para aprobacion")
+
+    solicitud.estado = "aprobada"
+
+    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
+    for administrador in administradores:
+        crear_notificacion(
+            db,
+            administrador.id,
+            f"Solicitud #{solicitud.id} aprobada por cliente",
+            f"El cliente {user['nombre']} aprobo la solicitud #{solicitud.id}.",
+            "aprobacion_cliente",
+        )
+
+    if solicitud.proveedor_cotizo_id:
+        crear_notificacion(
+            db,
+            int(solicitud.proveedor_cotizo_id),
+            f"Solicitud #{solicitud.id} aprobada",
+            f"El cliente aprobo la solicitud #{solicitud.id} y ya puedes ejecutar el servicio.",
+            "aprobacion_proveedor",
+        )
+    elif es_solicitud_mantenimiento_taller(solicitud.tipo):
+        for taller_id in parse_proveedores_ids(solicitud.proveedores_ids):
+            crear_notificacion(
+                db,
+                taller_id,
+                f"Solicitud #{solicitud.id} aprobada",
+                f"El cliente aprobo la solicitud #{solicitud.id} y el taller ya puede ejecutar el servicio.",
+                "aprobacion_taller",
+            )
+
+    db.commit()
+    db.refresh(solicitud)
+
+    return {
+        "mensaje": "solicitud aprobada por el cliente",
         "id": solicitud.id,
         "estado": solicitud.estado,
     }

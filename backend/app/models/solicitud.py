@@ -21,4 +21,8 @@ class Solicitud(Base):
     disponibilidad = Column(String(120), nullable=True)
     precio = Column(String(120), nullable=True)
     observacion = Column(Text, nullable=True)
+    diagnostico_taller = Column(Text, nullable=True)
+    servicios_taller = Column(Text, nullable=True)
+    horas_taller = Column(String(20), nullable=True)
+    materiales_taller = Column(Text, nullable=True)
     fecha = Column(DateTime, server_default=func.now())

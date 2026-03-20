@@ -1,10 +1,29 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Alert, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
-import { formatCurrency } from "../../constants/formatters";
+import { formatCurrency, formatDateTime } from "../../constants/formatters";
+import {
+  isApprovedStatus,
+  getStatusLabel,
+  isCancelledStatus,
+  isCreatedStatus,
+  isDiagnosedStatus,
+  isFinishedStatus,
+  isInDiagnosisStatus,
+  isInQuotationStatus,
+  isProposalReadyStatus,
+  isQuoteWorkflowService,
+  isQuotedStatus,
+  isRejectedAdminStatus,
+  isRejectedClientStatus,
+  isRejectedProviderStatus,
+  isRejectedWorkshopStatus,
+  isSentToClientStatus,
+  normalizeStatus,
+} from "../../constants/request-status";
 import storage from "../../constants/storage";
 
 type Solicitud = {
@@ -12,6 +31,7 @@ type Solicitud = {
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  fecha?: string | null;
   vehiculo?: {
     marca?: string;
     modelo?: string;
@@ -43,6 +63,7 @@ type Solicitud = {
     respuestas?: {
       proveedor_id?: number | string | null;
       proveedor_nombre?: string | null;
+      response_index?: number | null;
       marca?: string | null;
       referencia?: string | null;
       garantia?: string | null;
@@ -50,6 +71,12 @@ type Solicitud = {
       precio?: string | null;
       observacion?: string | null;
     }[];
+  };
+  taller_diagnostico?: {
+    diagnostico?: string | null;
+    servicios?: string | null;
+    horas?: string | null;
+    materiales?: string | null;
   };
 };
 
@@ -81,15 +108,6 @@ const sideMenu = [
   { label: "Pagos", icon: "credit-card-outline" },
   { label: "Reportes", icon: "chart-box-outline" },
   { label: "Configuracion", icon: "cog-outline" },
-];
-
-const kpis = [
-  { label: "Servicios hoy", value: "28", tone: "#9eff6f" },
-  { label: "Vehiculos en proceso", value: "12", tone: "#73d0ff" },
-  { label: "Ingresos del dia", value: "$8.500.000", tone: "#ffb84d" },
-  { label: "Ticket promedio", value: "$303.000", tone: "#ff8a8a" },
-  { label: "Tiempo promedio", value: "6.2h", tone: "#d5a6ff" },
-  { label: "Tasa cancelacion", value: "3.8%", tone: "#ff6d6d" },
 ];
 
 const servicesByDay = [14, 18, 16, 22, 20, 25, 28];
@@ -164,17 +182,32 @@ export default function AdministratorDashboardScreen() {
   const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>([]);
   const [returnToClientId, setReturnToClientId] = useState<string | null>(null);
   const [returnToClientComment, setReturnToClientComment] = useState("");
+  const [selectedOrderFilter, setSelectedOrderFilter] = useState<string>("Estado");
+  const [expandedSummaryCardId, setExpandedSummaryCardId] = useState<string | null>(null);
 
-  const enviarCotizacionAlCliente = async (solicitudId: string | number | undefined) => {
+  const enviarCotizacionAlCliente = async (
+    solicitudId: string | number | undefined,
+    proveedorId?: string | number | null,
+    responseIndex?: number | null
+  ) => {
     if (solicitudId == null) return;
 
     try {
       const token = await obtenerTokenSesion();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/enviar-cliente`, {
         method: "PATCH",
-        headers: {
+        headers: proveedorId != null ? {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        } : {
           Authorization: `Bearer ${token}`,
         },
+        body: proveedorId != null
+          ? JSON.stringify({
+              proveedor_id: Number(proveedorId),
+              response_index: responseIndex != null ? Number(responseIndex) : null,
+            })
+          : undefined,
       });
 
       const data = await response.json();
@@ -195,7 +228,8 @@ export default function AdministratorDashboardScreen() {
 
   const omitirCotizacionCliente = async (
     solicitudId: string | number | undefined,
-    proveedorId?: string | number | null
+    proveedorId?: string | number | null,
+    responseIndex?: number | null
   ) => {
     if (solicitudId == null) return;
 
@@ -209,6 +243,7 @@ export default function AdministratorDashboardScreen() {
         },
         body: JSON.stringify({
           proveedor_id: proveedorId != null ? Number(proveedorId) : null,
+          response_index: responseIndex != null ? Number(responseIndex) : null,
         }),
       });
 
@@ -299,8 +334,35 @@ export default function AdministratorDashboardScreen() {
   };
 
   const esSolicitudParaCotizar = (tipoServicio?: string) => {
-    const value = (tipoServicio || "").toLowerCase();
-    return value.includes("bateria") || value.includes("llanta") || value.includes("aceite");
+    const value = (tipoServicio || "").toLowerCase().trim();
+
+    if (value.includes(",") || value.includes(":")) {
+      return false;
+    }
+
+    return (
+      value === "bateria" ||
+      value === "llantas" ||
+      value === "cambio de aceite" ||
+      value === "aceite" ||
+      value === "frenos"
+    );
+  };
+
+  const esSolicitudMantenimientoTaller = (tipoServicio?: string) => {
+    const value = (tipoServicio || "").toLowerCase().trim();
+
+    return (
+      !esSolicitudParaCotizar(tipoServicio) &&
+      (value.includes(":") ||
+        value.includes(",") ||
+        value.includes("mantenimiento") ||
+        value.includes("diagnostico") ||
+        value.includes("escaneo") ||
+        value.includes("motor") ||
+        value.includes("suspension") ||
+        value.includes("alineacion"))
+    );
   };
 
   const obtenerEspecialidadSolicitud = (tipoServicio?: string) => {
@@ -376,6 +438,40 @@ export default function AdministratorDashboardScreen() {
         { text: "Enviar", onPress: confirmarEnvio },
       ]
     );
+  };
+
+  const enviarSolicitudATalleres = async (solicitudId: string | number) => {
+    if (selectedProviderIds.length === 0) {
+      Alert.alert("Seleccion requerida", "Debes elegir al menos un taller.");
+      return;
+    }
+
+    try {
+      const token = await obtenerTokenSesion();
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/enviar-taller`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ taller_ids: selectedProviderIds }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Error", data.detail || "No se pudo enviar la solicitud al taller");
+        return;
+      }
+
+      setQuoteRequestId(null);
+      setSelectedProviderIds([]);
+      await cargarSolicitudes();
+      Alert.alert("Enviado", "La solicitud fue enviada al taller.");
+    } catch (error) {
+      console.log("Error enviando a talleres", error);
+      Alert.alert("Error", "No se pudo conectar al servidor");
+    }
   };
 
   const devolverSolicitudAlCliente = async (solicitudId: string | number | undefined) => {
@@ -498,13 +594,21 @@ export default function AdministratorDashboardScreen() {
   };
 
   const pendingRequests = useMemo(
-    () => solicitudes.filter((item) => (item.estado || "").toLowerCase() === "pendiente"),
+    () =>
+      solicitudes.filter((item) => {
+        const status = normalizeStatus(item.estado);
+        return status === "pendiente" || isCreatedStatus(status) || status === "en_revision";
+      }),
     [solicitudes]
   );
   const archivedRequests = useMemo(
     () =>
       solicitudes.filter((item) =>
-        ["archivada", "omitida_admin", "devuelta"].includes((item.estado || "").toLowerCase())
+        ["omitida_admin"].includes(normalizeStatus(item.estado)) ||
+        isCancelledStatus(item.estado) ||
+        isRejectedClientStatus(item.estado) ||
+        isRejectedAdminStatus(item.estado) ||
+        isRejectedWorkshopStatus(item.estado)
       ),
     [solicitudes]
   );
@@ -512,7 +616,14 @@ export default function AdministratorDashboardScreen() {
   const quoteRequests = useMemo(
     () =>
       solicitudes.filter((item) =>
-        ["cotizando", "cotizado", "devuelto_proveedor"].includes((item.estado || "").toLowerCase())
+        isInDiagnosisStatus(item.estado) ||
+        isDiagnosedStatus(item.estado) ||
+        isInQuotationStatus(item.estado) ||
+        isQuotedStatus(item.estado) ||
+        isProposalReadyStatus(item.estado) ||
+        isSentToClientStatus(item.estado) ||
+        isApprovedStatus(item.estado) ||
+        isRejectedProviderStatus(item.estado)
       ),
     [solicitudes]
   );
@@ -546,6 +657,7 @@ export default function AdministratorDashboardScreen() {
 
     if (solicitudId) {
       setQuoteRequestId(solicitudId);
+      setExpandedQuoteResponseId(solicitudId);
     }
 
     setNotificaciones((current) =>
@@ -556,24 +668,32 @@ export default function AdministratorDashboardScreen() {
   };
 
   const obtenerEstadoCotizacion = (estado?: string) => {
-    if ((estado || "").toLowerCase() === "devuelto_proveedor") {
+    if (isInDiagnosisStatus(estado)) {
       return {
-        label: "Devuelto por proveedor",
+        label: "En espera del taller",
+        pillStyle: styles.requestStatusPill,
+        textStyle: styles.requestStatusText,
+      };
+    }
+
+    if (isRejectedProviderStatus(estado)) {
+      return {
+        label: getStatusLabel(estado),
         pillStyle: styles.requestStatusPillReturned,
         textStyle: styles.requestStatusTextReturned,
       };
     }
 
-    if ((estado || "").toLowerCase() === "cotizado") {
+    if (isQuotedStatus(estado) || isProposalReadyStatus(estado) || isSentToClientStatus(estado)) {
       return {
-        label: "Cotizado",
+        label: getStatusLabel(estado),
         pillStyle: styles.requestStatusPillSuccess,
         textStyle: styles.requestStatusTextSuccess,
       };
     }
 
     return {
-      label: "Cotizacion",
+      label: getStatusLabel(estado),
       pillStyle: styles.requestStatusPill,
       textStyle: styles.requestStatusText,
     };
@@ -590,6 +710,7 @@ export default function AdministratorDashboardScreen() {
       return solicitud.cotizacion.respuestas.map((respuesta) => ({
         proveedorId: respuesta.proveedor_id || null,
         proveedorNombre: respuesta.proveedor_nombre || "Proveedor",
+        responseIndex: respuesta.response_index ?? 0,
         marca: respuesta.marca || "Sin marca",
         referencia: respuesta.referencia || "Sin referencia",
         garantia: respuesta.garantia || "Sin garantia",
@@ -618,6 +739,7 @@ export default function AdministratorDashboardScreen() {
     return Array.from({ length: total }, (_, index) => ({
       proveedorId: null,
       proveedorNombre: `Proveedor ${index + 1}`,
+      responseIndex: index,
       marca: marcas[index] || "Sin marca",
       referencia: referencias[index] || "Sin referencia",
       garantia: garantias[index] || "Sin garantia",
@@ -709,6 +831,192 @@ export default function AdministratorDashboardScreen() {
       { label: "Administradores", count: usuarios.filter((item) => item.rol === "administrador").length },
     ];
   }, [usuarios]);
+
+  const obtenerTituloSolicitud = (tipoServicio?: string) => {
+    const value = (tipoServicio || "").toLowerCase();
+
+    if (value.includes("llanta")) return "Solicitud de llantas";
+    if (value.includes("bateria")) return "Solicitud de bateria";
+    if (value.includes("aceite") || value.includes("filtro")) return "Solicitud de aceite";
+
+    return tipoServicio || "Solicitud";
+  };
+
+  const dashboardKpis = useMemo(
+    () => [
+      { label: "Solicitudes", value: String(solicitudes.length), tone: "#9eff6f" },
+      {
+        label: "Creadas / Revision",
+        value: String(pendingRequests.length),
+        tone: "#73d0ff",
+      },
+      {
+        label: "Cotizadas",
+        value: String(
+          solicitudes.filter((item) =>
+            isInQuotationStatus(item.estado) || isQuotedStatus(item.estado) || isSentToClientStatus(item.estado)
+          ).length
+        ),
+        tone: "#ffb84d",
+      },
+      {
+        label: "Devueltas",
+        value: String(
+          solicitudes.filter((item) =>
+            isRejectedClientStatus(item.estado) || isRejectedProviderStatus(item.estado)
+          ).length
+        ),
+        tone: "#ff8a8a",
+      },
+      {
+        label: "Finalizadas",
+        value: String(
+          solicitudes.filter((item) => isFinishedStatus(item.estado)).length
+        ),
+        tone: "#d5a6ff",
+      },
+      {
+        label: "Talleres",
+        value: String(talleres.length),
+        tone: "#ff6d6d",
+      },
+    ],
+    [pendingRequests.length, solicitudes, talleres.length]
+  );
+
+  const statusSummaryCards = useMemo(
+    () => [
+      {
+        id: "status-pendientes",
+        label: "Pendientes",
+        value: pendingRequests.length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: pendingRequests.map((item) =>
+          `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`
+        ),
+      },
+      {
+        id: "status-cotizando",
+        label: "En cotizacion",
+        value: solicitudes.filter((item) => isInQuotationStatus(item.estado)).length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: solicitudes
+          .filter((item) => isInQuotationStatus(item.estado))
+          .map((item) => `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`),
+      },
+      {
+        id: "status-cotizado",
+        label: "Cotizada",
+        value: solicitudes.filter((item) => isQuotedStatus(item.estado)).length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: solicitudes
+          .filter((item) => isQuotedStatus(item.estado))
+          .map((item) => `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`),
+      },
+      {
+        id: "status-devuelto-proveedor",
+        label: "Rechazada proveedor",
+        value: solicitudes.filter((item) => isRejectedProviderStatus(item.estado)).length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: solicitudes
+          .filter((item) => isRejectedProviderStatus(item.estado))
+          .map((item) => `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`),
+      },
+      {
+        id: "status-devuelta-cliente",
+        label: "Rechazada cliente",
+        value: solicitudes.filter((item) => isRejectedClientStatus(item.estado)).length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: solicitudes
+          .filter((item) => isRejectedClientStatus(item.estado))
+          .map((item) => `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`),
+      },
+      {
+        id: "status-finalizadas",
+        label: "Finalizadas",
+        value: solicitudes.filter((item) => isFinishedStatus(item.estado)).length,
+        icon: "chart-box-outline",
+        color: "#2563eb",
+        details: solicitudes
+          .filter((item) => isFinishedStatus(item.estado))
+          .map((item) => `Orden #${item.id} • ${item.cliente?.nombre || "Cliente"} • ${obtenerTituloSolicitud(item.tipo_servicio)}`),
+      },
+    ],
+    [pendingRequests.length, solicitudes]
+  );
+
+  const actorSummaryCards = useMemo(
+    () => [
+      {
+        id: "actor-clientes",
+        label: "Clientes",
+        value: usuarios.filter((item) => item.rol === "cliente").length,
+        icon: "account-group-outline",
+        color: "#23b26d",
+        details: usuarios
+          .filter((item) => item.rol === "cliente")
+          .map((item) => `${item.nombre || "Cliente"} • ${item.email || "Sin email"}`),
+      },
+      {
+        id: "actor-talleres",
+        label: "Talleres",
+        value: talleres.length,
+        icon: "account-group-outline",
+        color: "#23b26d",
+        details: talleres.map((item) => `${item.nombre || "Taller"} • ${item.email || "Sin email"}`),
+      },
+      {
+        id: "actor-proveedores",
+        label: "Proveedores",
+        value: proveedores.length,
+        icon: "account-group-outline",
+        color: "#23b26d",
+        details: proveedores.map((item) => `${item.nombre || "Proveedor"} • ${item.email || "Sin email"}`),
+      },
+      {
+        id: "actor-administradores",
+        label: "Administradores",
+        value: usuarios.filter((item) => item.rol === "administrador").length,
+        icon: "account-group-outline",
+        color: "#23b26d",
+        details: usuarios
+          .filter((item) => item.rol === "administrador")
+          .map((item) => `${item.nombre || "Administrador"} • ${item.email || "Sin email"}`),
+      },
+    ],
+    [proveedores, talleres, usuarios]
+  );
+
+  const filteredPendingRequests = useMemo(() => {
+    if (selectedOrderFilter === "Clientes") {
+      return [...pendingRequests].sort((a, b) =>
+        (a.cliente?.nombre || "").localeCompare(b.cliente?.nombre || "")
+      );
+    }
+
+    if (selectedOrderFilter === "Proveedores") {
+      return [...pendingRequests].sort((a, b) => {
+        const left = esSolicitudParaCotizar(a.tipo_servicio) ? 0 : 1;
+        const right = esSolicitudParaCotizar(b.tipo_servicio) ? 0 : 1;
+        return left - right;
+      });
+    }
+
+    if (selectedOrderFilter === "Taller") {
+      return [...pendingRequests].sort((a, b) => {
+        const left = esSolicitudParaCotizar(a.tipo_servicio) ? 1 : 0;
+        const right = esSolicitudParaCotizar(b.tipo_servicio) ? 1 : 0;
+        return left - right;
+      });
+    }
+
+    return [...pendingRequests].sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+  }, [pendingRequests, selectedOrderFilter]);
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={styles.layout}>
@@ -810,30 +1118,32 @@ export default function AdministratorDashboardScreen() {
           </View>
 
           {showNotifications ? (
-            <View style={styles.notificationsDropdown}>
-              <Text style={styles.notificationsTitle}>Notificaciones</Text>
-              {notificaciones.length > 0 ? (
-                notificaciones.map((item) => (
-                  <TouchableOpacity
-                    key={String(item.id)}
-                    style={styles.notificationItem}
-                    activeOpacity={0.9}
-                    onPress={() => abrirDesdeNotificacion(item)}
-                  >
-                    <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
-                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
-                  </TouchableOpacity>
-                ))
-              ) : (
-                <Text style={styles.panelText}>No tienes notificaciones nuevas.</Text>
-              )}
+            <View style={styles.notificationsOverlay}>
+              <Pressable style={styles.notificationsBackdrop} onPress={() => setShowNotifications(false)} />
+              <View style={styles.notificationsDropdown}>
+                <Text style={styles.notificationsTitle}>Notificaciones</Text>
+                {notificaciones.length > 0 ? (
+                  notificaciones.map((item) => (
+                    <TouchableOpacity
+                      key={String(item.id)}
+                      style={styles.notificationItem}
+                      activeOpacity={0.9}
+                      onPress={() => abrirDesdeNotificacion(item)}
+                    >
+                      <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.panelText}>No tienes notificaciones nuevas.</Text>
+                )}
+              </View>
             </View>
           ) : null}
 
           {selectedSection === "Vista general" && (
             <>
               <View style={styles.kpiGrid}>
-                {kpis.map((item) => (
+                {dashboardKpis.map((item) => (
                   <View key={item.label} style={[styles.kpiCard, isMobile && styles.kpiCardMobile]}>
                     <View style={[styles.kpiPill, { backgroundColor: item.tone }]} />
                     <Text style={styles.kpiLabel}>{item.label}</Text>
@@ -845,71 +1155,114 @@ export default function AdministratorDashboardScreen() {
               <View style={[styles.chartRow, isMobile && styles.chartRowMobile]}>
                 <View style={styles.panelLarge}>
                   <View style={styles.panelHeader}>
-                    <Text style={styles.panelTitle}>Servicios por dia</Text>
-                    <Text style={styles.panelMeta}>Ultimos 7 dias</Text>
+                    <Text style={styles.panelTitle}>Estados de solicitudes</Text>
                   </View>
-                  <View style={styles.barChart}>
-                    {servicesByDay.map((value, index) => (
-                      <View key={index} style={styles.barItem}>
-                        <View style={[styles.barFill, { height: value * 5 }]} />
-                        <Text style={styles.barLabel}>D{index + 1}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
+                  {statusSummaryCards.map((item) => {
+                    const expanded = expandedSummaryCardId === item.id;
 
-                <View style={styles.panelMedium}>
-                  <View style={styles.panelHeader}>
-                    <Text style={styles.panelTitle}>Ingresos</Text>
-                    <Text style={styles.panelMeta}>Diarios / mensuales</Text>
-                  </View>
-                  <View style={styles.incomeChart}>
-                    {incomeBars.map((value, index) => (
-                      <View key={index} style={styles.incomeRow}>
-                        <Text style={styles.incomeLabel}>P{index + 1}</Text>
-                        <View style={styles.incomeTrack}>
-                          <View style={[styles.incomeFill, { width: `${value}%` }]} />
+                    return (
+                      <TouchableOpacity
+                        key={item.id}
+                        style={styles.simpleRow}
+                        activeOpacity={0.92}
+                        onPress={() =>
+                          setExpandedSummaryCardId((current) => (current === item.id ? null : item.id))
+                        }
+                      >
+                        <View style={styles.summaryRowTop}>
+                          <MaterialCommunityIcons name={item.icon as any} size={18} color={item.color} />
+                          <Text style={styles.simpleText}>{item.label}</Text>
+                          <Text style={styles.summaryInlineValue}>{item.value}</Text>
                         </View>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              </View>
-
-              <View style={[styles.chartRow, isMobile && styles.chartRowMobile]}>
-                <View style={styles.panelLarge}>
-                  <View style={styles.panelHeader}>
-                    <Text style={styles.panelTitle}>Servicios por tipo</Text>
-                    <Text style={styles.panelMeta}>Lo que mas vende</Text>
-                  </View>
-
-                  {servicesByType.map((item) => (
-                    <View key={item.label} style={styles.typeRow}>
-                      <Text style={styles.typeLabel}>{item.label}</Text>
-                      <View style={styles.typeTrack}>
-                        <View style={[styles.typeFill, { width: `${item.value}%`, backgroundColor: item.color }]} />
-                      </View>
-                      <Text style={styles.typeValue}>{item.value}%</Text>
-                    </View>
-                  ))}
+                        {expanded ? (
+                          <View style={styles.summaryExpandedBlock}>
+                            <Text style={styles.summaryExpandedText}>Cantidad: {item.value}</Text>
+                            {item.details.length > 0 ? (
+                              item.details.map((detail, index) => (
+                                <Text key={`${item.id}-detail-${index}`} style={styles.summaryDetailText}>
+                                  {detail}
+                                </Text>
+                              ))
+                            ) : (
+                              <Text style={styles.summaryDetailEmpty}>Sin registros</Text>
+                            )}
+                          </View>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
 
                 <View style={styles.panelMedium}>
-                  <Text style={styles.panelTitle}>Filtros ordenes</Text>
-                  <View style={styles.filterWrap}>
-                    {["Estado", "Fecha", "Ciudad", "Taller"].map((filter) => (
-                      <View key={filter} style={styles.filterChip}>
-                        <Text style={styles.filterChipText}>{filter}</Text>
-                      </View>
-                    ))}
+                  <View style={styles.panelHeader}>
+                    <Text style={styles.panelTitle}>Actores registrados</Text>
                   </View>
+                  {actorSummaryCards.map((item) => {
+                    const expanded = expandedSummaryCardId === item.id;
+
+                    return (
+                      <TouchableOpacity
+                        key={item.id}
+                        style={styles.simpleRow}
+                        activeOpacity={0.92}
+                        onPress={() =>
+                          setExpandedSummaryCardId((current) => (current === item.id ? null : item.id))
+                        }
+                      >
+                        <View style={styles.summaryRowTop}>
+                          <MaterialCommunityIcons name={item.icon as any} size={18} color={item.color} />
+                          <Text style={styles.simpleText}>{item.label}</Text>
+                          <Text style={styles.summaryInlineValue}>{item.value}</Text>
+                        </View>
+                        {expanded ? (
+                          <View style={styles.summaryExpandedBlock}>
+                            <Text style={styles.summaryExpandedText}>Cantidad: {item.value}</Text>
+                            {item.details.length > 0 ? (
+                              item.details.map((detail, index) => (
+                                <Text key={`${item.id}-detail-${index}`} style={styles.summaryDetailText}>
+                                  {detail}
+                                </Text>
+                              ))
+                            ) : (
+                              <Text style={styles.summaryDetailEmpty}>Sin registros</Text>
+                            )}
+                          </View>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
               </View>
             </>
           )}
 
-          {(selectedSection === "Vista general" || selectedSection === "Ordenes") && (
+          {selectedSection === "Ordenes" && (
             <View style={styles.panelFull}>
+            <View style={styles.panelMedium}>
+              <Text style={styles.panelTitle}>Filtros ordenes</Text>
+              <View style={styles.filterWrap}>
+                {["Estado", "Fecha", "Proveedores", "Clientes", "Taller"].map((filter) => (
+                  <TouchableOpacity
+                    key={filter}
+                    style={[
+                      styles.filterChip,
+                      selectedOrderFilter === filter && styles.filterChipActive,
+                    ]}
+                    onPress={() => setSelectedOrderFilter(filter)}
+                  >
+                    <Text
+                      style={[
+                        styles.filterChipText,
+                        selectedOrderFilter === filter && styles.filterChipTextActive,
+                      ]}
+                    >
+                      {filter}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
             <View style={styles.panelHeader}>
               <Text style={styles.panelTitle}>Modulo: Ordenes</Text>
               {loadingSolicitudes ? <Text style={styles.panelMeta}>Actualizando...</Text> : null}
@@ -925,9 +1278,10 @@ export default function AdministratorDashboardScreen() {
                 </View>
               </View>
 
-              {pendingRequests.length > 0 ? (
-                pendingRequests.map((item) => {
+              {filteredPendingRequests.length > 0 ? (
+                filteredPendingRequests.map((item) => {
                   const especialidadSolicitud = obtenerEspecialidadSolicitud(item.tipo_servicio);
+                  const esCotizacion = esSolicitudParaCotizar(item.tipo_servicio);
                   const proveedoresCompatibles = especialidadSolicitud
                     ? proveedores.filter(
                         (proveedor) =>
@@ -938,11 +1292,12 @@ export default function AdministratorDashboardScreen() {
                   return (
                   <View key={`pending-${item.id}`} style={styles.requestCard}>
                     <View style={styles.requestHeader}>
-                      <Text style={styles.requestId}>Orden #{item.id}</Text>
+                      <Text style={styles.requestId}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
                       <View style={styles.requestStatusPill}>
-                        <Text style={styles.requestStatusText}>Pendiente</Text>
+                        <Text style={styles.requestStatusText}>{getStatusLabel(item.estado)}</Text>
                       </View>
                     </View>
+                    <Text style={styles.requestText}>Orden #{item.id}</Text>
                     <Text style={styles.requestText}>
                       Cliente: {item.cliente?.nombre || "Cliente"}
                     </Text>
@@ -953,13 +1308,13 @@ export default function AdministratorDashboardScreen() {
                     </Text>
                     <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
                     <Text style={styles.requestText}>
-                      Servicio: {item.tipo_servicio || "Sin tipo"}
+                      Fecha y hora de recepcion: {formatDateTime(item.fecha)}
                     </Text>
                     <Text style={styles.requestText}>
                       Problema: {item.problema || "Sin descripcion"}
                     </Text>
 
-                    {esSolicitudParaCotizar(item.tipo_servicio) ? (
+                    {esCotizacion ? (
                       <>
                         <View style={styles.requestPrimaryActions}>
                           <TouchableOpacity
@@ -1040,11 +1395,11 @@ export default function AdministratorDashboardScreen() {
                                 style={styles.acceptButton}
                                 onPress={() => enviarCotizacionAProveedores(item.id || "")}
                               >
-                                <Text style={styles.acceptButtonText}>Enviar</Text>
-                              </TouchableOpacity>
-                            </View>
+                              <Text style={styles.acceptButtonText}>Enviar</Text>
+                            </TouchableOpacity>
                           </View>
-                        ) : null}
+                        </View>
+                      ) : null}
 
                         {returnToClientId === String(item.id) ? (
                           <View style={styles.returnClientCard}>
@@ -1069,7 +1424,78 @@ export default function AdministratorDashboardScreen() {
                           </View>
                         ) : null}
                       </>
-                    ) : null}
+                    ) : (
+                      <>
+                        <View style={styles.requestPrimaryActions}>
+                          <TouchableOpacity
+                            style={styles.quoteButton}
+                            onPress={() => {
+                              if (quoteRequestId === String(item.id)) {
+                                setQuoteRequestId(null);
+                                setSelectedProviderIds([]);
+                                return;
+                              }
+
+                              setQuoteRequestId(String(item.id));
+                              setSelectedProviderIds([]);
+                            }}
+                          >
+                            <Text style={styles.quoteButtonText}>Talleres</Text>
+                            <MaterialCommunityIcons
+                              name={quoteRequestId === String(item.id) ? "chevron-up" : "chevron-down"}
+                              size={18}
+                              color="#2563eb"
+                            />
+                          </TouchableOpacity>
+                        </View>
+
+                        {quoteRequestId === String(item.id) ? (
+                          <View style={styles.providerSelectionCard}>
+                            <Text style={styles.providerSelectionTitle}>Elegir talleres</Text>
+                            {talleres.length > 0 ? (
+                              talleres.map((taller) => {
+                                const tallerId = Number(taller.id);
+                                const selected = selectedProviderIds.includes(tallerId);
+
+                                return (
+                                  <TouchableOpacity
+                                    key={`taller-${taller.id}`}
+                                    style={[
+                                      styles.providerOption,
+                                      selected && styles.providerOptionSelected,
+                                    ]}
+                                    onPress={() => toggleProveedorSeleccionado(tallerId)}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.providerOptionTitle,
+                                        selected && styles.providerOptionTitleSelected,
+                                      ]}
+                                    >
+                                      {taller.nombre || "Taller"}
+                                    </Text>
+                                    <Text style={styles.providerOptionText}>
+                                      {taller.email || "Sin email"}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })
+                            ) : (
+                              <Text style={styles.requestText}>No hay talleres disponibles para esta solicitud.</Text>
+                            )}
+
+                            <View style={styles.providerActions}>
+                              <TouchableOpacity
+                                style={styles.acceptButton}
+                                onPress={() => enviarSolicitudATalleres(item.id || "")}
+                              >
+                                <Text style={styles.acceptButtonText}>Enviar</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ) : null}
+                      </>
+                    )}
                   </View>
                   );
                 })
@@ -1086,9 +1512,9 @@ export default function AdministratorDashboardScreen() {
             <View style={styles.notificationPanel}>
               <View style={styles.notificationHeader}>
                 <View>
-                  <Text style={styles.notificationTitle}>Solicitudes en cotizacion</Text>
+                  <Text style={styles.notificationTitle}>Seguimiento de solicitudes</Text>
                   <Text style={styles.notificationSubtitle}>
-                    Estas ordenes ya fueron enviadas a proveedores por el administrador.
+                    Aqui ves las solicitudes enviadas a taller, los diagnosticos recibidos, las cotizaciones y la propuesta al cliente.
                   </Text>
                 </View>
               </View>
@@ -1100,6 +1526,10 @@ export default function AdministratorDashboardScreen() {
                       const estadoCotizacion = obtenerEstadoCotizacion(item.estado);
                       const respuestasCotizacion = obtenerRespuestasCotizacion(item);
                       const expandedQuote = expandedQuoteResponseId === String(item.id);
+                      const solicitudTaller = esSolicitudMantenimientoTaller(item.tipo_servicio);
+                      const puedeEnviarDirectoCliente =
+                        solicitudTaller &&
+                        (isDiagnosedStatus(item.estado) || isProposalReadyStatus(item.estado));
 
                       return (
                     <>
@@ -1112,7 +1542,7 @@ export default function AdministratorDashboardScreen() {
                       }
                     >
                       <View style={styles.requestHeader}>
-                        <Text style={styles.requestId}>Orden #{item.id}</Text>
+                        <Text style={styles.requestId}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
                         <View style={[styles.requestStatusPill, estadoCotizacion.pillStyle]}>
                           <Text style={[styles.requestStatusText, estadoCotizacion.textStyle]}>
                             {estadoCotizacion.label}
@@ -1128,16 +1558,112 @@ export default function AdministratorDashboardScreen() {
                           "Vehiculo"}
                       </Text>
                       <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
+                      <Text style={styles.requestText}>Orden #{item.id}</Text>
                       <Text style={styles.requestText}>
-                        Servicio: {item.tipo_servicio || "Sin tipo"}
+                        Fecha y hora de recepcion: {formatDateTime(item.fecha)}
                       </Text>
                       <Text style={styles.requestText}>
                         Problema: {item.problema || "Sin descripcion"}
                       </Text>
                       <Text style={styles.quoteExpandHint}>
-                        {expandedQuote ? "Toca para ocultar respuestas" : "Toca la orden para ver respuestas"}
+                        {expandedQuote ? "Toca para ocultar detalle" : "Toca la orden para ver detalle"}
                       </Text>
                     </TouchableOpacity>
+
+                    {expandedQuote && solicitudTaller && isDiagnosedStatus(item.estado) ? (
+                      <View style={styles.providerSelectionCard}>
+                        {item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales ? (
+                          <View style={styles.quoteSummaryCard}>
+                            <Text style={styles.quoteSummaryTitle}>Diagnostico del taller</Text>
+                            <Text style={styles.requestText}>Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}</Text>
+                            <Text style={styles.requestText}>Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}</Text>
+                            <Text style={styles.requestText}>Horas: {item.taller_diagnostico?.horas || "Sin horas"}</Text>
+                            <Text style={styles.requestText}>Materiales: {item.taller_diagnostico?.materiales || "Sin materiales"}</Text>
+                          </View>
+                        ) : null}
+
+                        <Text style={styles.providerSelectionTitle}>Definir siguiente paso</Text>
+                        <Text style={styles.requestText}>
+                          El diagnostico ya fue recibido. Ahora puedes enviar materiales a proveedores o mandar la propuesta directo al cliente.
+                        </Text>
+
+                        <View style={styles.requestPrimaryActions}>
+                          <TouchableOpacity
+                            style={styles.quoteButton}
+                            onPress={() => {
+                              if (quoteRequestId === String(item.id)) {
+                                setQuoteRequestId(null);
+                                setSelectedProviderIds([]);
+                                return;
+                              }
+
+                              setQuoteRequestId(String(item.id));
+                              setSelectedProviderIds([]);
+                            }}
+                          >
+                            <Text style={styles.quoteButtonText}>Proveedores</Text>
+                            <MaterialCommunityIcons
+                              name={quoteRequestId === String(item.id) ? "chevron-up" : "chevron-down"}
+                              size={18}
+                              color="#2563eb"
+                            />
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={styles.acceptButton}
+                            onPress={() => enviarCotizacionAlCliente(item.id)}
+                          >
+                            <Text style={styles.acceptButtonText}>Enviar directo al cliente</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {quoteRequestId === String(item.id) ? (
+                          <View style={styles.providerSelectionCard}>
+                            <Text style={styles.providerSelectionTitle}>Elegir proveedores</Text>
+                            {proveedores.length > 0 ? (
+                              proveedores.map((proveedor) => {
+                                const proveedorId = Number(proveedor.id);
+                                const selected = selectedProviderIds.includes(proveedorId);
+
+                                return (
+                                  <TouchableOpacity
+                                    key={`diagnosed-provider-${item.id}-${proveedor.id}`}
+                                    style={[
+                                      styles.providerOption,
+                                      selected && styles.providerOptionSelected,
+                                    ]}
+                                    onPress={() => toggleProveedorSeleccionado(proveedorId)}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.providerOptionTitle,
+                                        selected && styles.providerOptionTitleSelected,
+                                      ]}
+                                    >
+                                      {proveedor.nombre || "Proveedor"}
+                                    </Text>
+                                    <Text style={styles.providerOptionText}>
+                                      {proveedor.email || "Sin email"}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })
+                            ) : (
+                              <Text style={styles.requestText}>No hay proveedores disponibles.</Text>
+                            )}
+
+                            <View style={styles.providerActions}>
+                              <TouchableOpacity
+                                style={styles.acceptButton}
+                                onPress={() => enviarCotizacionAProveedores(item.id || "")}
+                              >
+                                <Text style={styles.acceptButtonText}>Enviar a proveedores</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ) : null}
+                      </View>
+                    ) : null}
 
                     {expandedQuote && respuestasCotizacion.length > 0 ? (
                       respuestasCotizacion.map((respuesta, index) => (
@@ -1155,11 +1681,21 @@ export default function AdministratorDashboardScreen() {
                           <Text style={styles.requestText}>
                             Observacion: {respuesta.observacion}
                           </Text>
-                          {(item.estado || "").toLowerCase() === "cotizado" ? (
+                          {isQuotedStatus(item.estado) ? (
                             <View style={styles.quoteDecisionRow}>
                               <TouchableOpacity
+                                style={[styles.quoteDecisionButton, styles.quoteDecisionSendButton]}
+                                onPress={() =>
+                                  enviarCotizacionAlCliente(item.id, respuesta.proveedorId, respuesta.responseIndex)
+                                }
+                              >
+                                <Text style={styles.quoteDecisionSendText}>Enviar</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
                                 style={[styles.quoteDecisionButton, styles.quoteDecisionSkipButton]}
-                                onPress={() => omitirCotizacionCliente(item.id, respuesta.proveedorId)}
+                                onPress={() =>
+                                  omitirCotizacionCliente(item.id, respuesta.proveedorId, respuesta.responseIndex)
+                                }
                               >
                                 <Text style={styles.quoteDecisionSkipText}>Omitir</Text>
                               </TouchableOpacity>
@@ -1168,66 +1704,27 @@ export default function AdministratorDashboardScreen() {
                         </View>
                       ))
                     ) : null}
-                    {expandedQuote && item.proveedores_estado && item.proveedores_estado.length > 0 ? (
-                      <View style={styles.providerStatusCard}>
-                        <Text style={styles.providerStatusTitle}>Estado por proveedor</Text>
-                        {item.proveedores_estado.map((proveedor) => (
-                          <View key={`provider-status-${item.id}-${proveedor.id}`} style={styles.providerStatusRow}>
-                            <Text style={styles.providerStatusName}>{proveedor.nombre || proveedor.email || "Proveedor"}</Text>
-                            <View
-                              style={[
-                                styles.providerStatusBadge,
-                                (proveedor.estado || "").toLowerCase() === "cotizado"
-                                  ? styles.providerStatusBadgeSuccess
-                                  : (proveedor.estado || "").toLowerCase() === "devuelto"
-                                    ? styles.providerStatusBadgeReturned
-                                    : styles.providerStatusBadgePending,
-                              ]}
-                            >
-                              <Text
-                                style={[
-                                  styles.providerStatusBadgeText,
-                                  (proveedor.estado || "").toLowerCase() === "cotizado"
-                                    ? styles.providerStatusBadgeTextSuccess
-                                    : (proveedor.estado || "").toLowerCase() === "devuelto"
-                                      ? styles.providerStatusBadgeTextReturned
-                                      : styles.providerStatusBadgeTextPending,
-                                ]}
-                              >
-                                {(proveedor.estado || "").toLowerCase() === "cotizado"
-                                  ? "Cotizado"
-                                  : (proveedor.estado || "").toLowerCase() === "devuelto"
-                                    ? "Devuelto"
-                                    : "Pendiente"}
-                              </Text>
-                            </View>
-                            {(proveedor.estado || "").toLowerCase() === "devuelto" && proveedor.comentario ? (
-                              <Text style={styles.providerStatusComment}>{proveedor.comentario}</Text>
-                            ) : null}
-                          </View>
-                        ))}
-                      </View>
-                    ) : null}
-                    </>
-                      );
-                    })()}
-                    {(item.estado || "").toLowerCase() === "devuelto_proveedor" && item.cotizacion?.observacion ? (
-                      <View style={styles.quoteSummaryCard}>
-                        <Text style={styles.quoteSummaryTitle}>Comentario del proveedor</Text>
-                        <Text style={styles.requestText}>{item.cotizacion.observacion}</Text>
-                      </View>
-                    ) : null}
-                    {(item.estado || "").toLowerCase() === "cotizado" ? (
+
+                    {expandedQuote && puedeEnviarDirectoCliente && !isDiagnosedStatus(item.estado) ? (
                       <View style={styles.quoteDecisionRow}>
                         <TouchableOpacity
                           style={[styles.quoteDecisionButton, styles.quoteDecisionSendButton]}
                           onPress={() => enviarCotizacionAlCliente(item.id)}
                         >
-                          <Text style={styles.quoteDecisionSendText}>Enviar</Text>
+                          <Text style={styles.quoteDecisionSendText}>Enviar al cliente</Text>
                         </TouchableOpacity>
                       </View>
                     ) : null}
-                    {(item.estado || "").toLowerCase() === "devuelto_proveedor" ? (
+                    </>
+                      );
+                    })()}
+                    {isRejectedProviderStatus(item.estado) && item.cotizacion?.observacion ? (
+                      <View style={styles.quoteSummaryCard}>
+                        <Text style={styles.quoteSummaryTitle}>Comentario del proveedor</Text>
+                        <Text style={styles.requestText}>{item.cotizacion.observacion}</Text>
+                      </View>
+                    ) : null}
+                    {isRejectedProviderStatus(item.estado) ? (
                       <View style={styles.returnClientCard}>
                         <TouchableOpacity
                           style={styles.returnClientToggleButton}
@@ -1262,12 +1759,6 @@ export default function AdministratorDashboardScreen() {
                         ) : null}
                       </View>
                     ) : null}
-                    <Text style={styles.requestText}>
-                      Proveedores:{" "}
-                      {item.proveedores && item.proveedores.length > 0
-                        ? item.proveedores.map((proveedor) => proveedor.nombre || "Proveedor").join(", ")
-                        : "Sin proveedores asignados"}
-                    </Text>
                   </View>
                 ))
               ) : (
@@ -1368,7 +1859,7 @@ export default function AdministratorDashboardScreen() {
           </View>
           )}
 
-          {(selectedSection === "Vista general" || selectedSection === "Talleres") && (
+          {selectedSection === "Talleres" && (
           <View style={[styles.bottomGrid, isMobile && styles.bottomGridMobile]}>
             <View style={styles.panel}>
               <Text style={styles.panelTitle}>Modulo: Talleres</Text>
@@ -1404,37 +1895,6 @@ export default function AdministratorDashboardScreen() {
               ))}
             </View>
 
-            {selectedSection === "Vista general" ? (
-            <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Modulo: Proveedores</Text>
-              {suppliers.map((item) => (
-                <View key={item.name} style={styles.infoCard}>
-                  <Text style={styles.infoTitle}>{item.name}</Text>
-                  <Text style={styles.infoText}>Cotizaciones enviadas: {item.quotes}</Text>
-                  <Text style={styles.infoText}>Tiempo promedio: {item.avgTime}</Text>
-                  {"status" in item ? <Text style={styles.infoText}>Estado: {item.status}</Text> : null}
-                  {"email" in item ? <Text style={styles.infoText}>Email: {item.email}</Text> : null}
-                  {"telefono" in item ? <Text style={styles.infoText}>Telefono: {item.telefono}</Text> : null}
-                  {"id" in item && "rawStatus" in item ? (
-                    <View style={styles.actionWrap}>
-                      <TouchableOpacity
-                        onPress={() =>
-                          actualizarEstadoUsuario(
-                            item.id,
-                            item.rawStatus === "bloqueado" ? "activo" : "bloqueado"
-                          )
-                        }
-                      >
-                        <Text style={styles.actionLink}>
-                          {item.rawStatus === "bloqueado" ? "Habilitar" : "Bloquear"}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : null}
-                </View>
-              ))}
-            </View>
-            ) : null}
           </View>
           )}
 
@@ -1472,7 +1932,7 @@ export default function AdministratorDashboardScreen() {
           </View>
           )}
 
-          {(selectedSection === "Vista general" || selectedSection === "Usuarios" || selectedSection === "Pagos") && (
+          {(selectedSection === "Usuarios" || selectedSection === "Pagos") && (
           <View style={[styles.bottomGrid, isMobile && styles.bottomGridMobile]}>
             <View style={styles.panel}>
               <Text style={styles.panelTitle}>Modulo: Usuarios</Text>
@@ -1512,7 +1972,7 @@ export default function AdministratorDashboardScreen() {
           </View>
           )}
 
-          {(selectedSection === "Vista general" || selectedSection === "Reportes" || selectedSection === "Configuracion") && (
+          {(selectedSection === "Reportes" || selectedSection === "Configuracion") && (
           <View style={[styles.bottomGrid, isMobile && styles.bottomGridMobile]}>
             <View style={styles.panel}>
               <Text style={styles.panelTitle}>Modulo: Reportes</Text>
@@ -1736,12 +2196,24 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
   notificationsDropdown: {
+    position: "absolute",
+    top: 110,
+    right: 0,
+    left: 0,
     backgroundColor: "#ffffff",
     borderRadius: 24,
     padding: 18,
     borderWidth: 1,
     borderColor: "#dbe4f0",
     marginTop: -4,
+    zIndex: 30,
+  },
+  notificationsOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 25,
+  },
+  notificationsBackdrop: {
+    ...StyleSheet.absoluteFillObject,
   },
   notificationsTitle: {
     color: "#08121f",
@@ -1963,9 +2435,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
+  filterChipActive: {
+    backgroundColor: "#dbeafe",
+  },
   filterChipText: {
     color: "#425066",
     fontWeight: "700",
+  },
+  filterChipTextActive: {
+    color: "#1d4ed8",
   },
   tableRow: {
     flexDirection: "row",
@@ -2368,9 +2846,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
   simpleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
     marginTop: 14,
     backgroundColor: "#f8fbff",
     borderRadius: 14,
@@ -2378,8 +2853,35 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#e6edf6",
   },
+  summaryRowTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
   simpleText: {
     color: "#2f3a49",
     fontWeight: "700",
+    flex: 1,
+  },
+  summaryInlineValue: {
+    color: "#64748b",
+    fontWeight: "800",
+  },
+  summaryExpandedText: {
+    color: "#08121f",
+    fontWeight: "800",
+    marginTop: 10,
+  },
+  summaryExpandedBlock: {
+    marginTop: 10,
+    gap: 8,
+  },
+  summaryDetailText: {
+    color: "#475569",
+    lineHeight: 20,
+  },
+  summaryDetailEmpty: {
+    color: "#94a3b8",
+    fontStyle: "italic",
   },
 });

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,7 +15,27 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
-import { formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
+import { formatDateTime, formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
+import {
+  getStatusLabel,
+  isCancelledStatus,
+  isCreatedStatus,
+  isDiagnosedStatus,
+  isFinishedStatus,
+  isHistoryStatus,
+  isInDiagnosisStatus,
+  isInProcessStatus,
+  isInQuotationStatus,
+  isOpenRequestStatus,
+  isProposalReadyStatus,
+  isQuoteWorkflowService,
+  isQuotedStatus,
+  isRejectedClientStatus,
+  isRejectedWorkshopStatus,
+  isSentToClientStatus,
+  normalizeServiceText,
+  normalizeStatus,
+} from "../../constants/request-status";
 import storage from "../../constants/storage";
 
 type Vehiculo = {
@@ -31,6 +52,7 @@ type Solicitud = {
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  fecha?: string | null;
   vehiculo?: {
     id?: number | string;
     marca?: string;
@@ -45,6 +67,9 @@ type Solicitud = {
     precio?: string | null;
     observacion?: string | null;
     respuestas?: {
+      proveedor_id?: string | number | null;
+      proveedor_nombre?: string | null;
+      response_index?: number | null;
       marca?: string | null;
       referencia?: string | null;
       garantia?: string | null;
@@ -53,6 +78,14 @@ type Solicitud = {
       observacion?: string | null;
     }[];
   };
+};
+
+type Taller = {
+  id?: number | string;
+  nombre?: string;
+  email?: string;
+  telefono?: string;
+  estado?: string;
 };
 
 type Notificacion = {
@@ -76,7 +109,7 @@ const dashboardServices = [
 
 const clientSections = [
   "Vista general",
-  "Mis vehiculos",
+  "Panel de control",
   "Mis servicios",
   "Pagos",
   "Historial",
@@ -86,7 +119,7 @@ const clientSections = [
 
 const sectionIcons: Record<string, string> = {
   "Vista general": "view-dashboard-outline",
-  "Mis vehiculos": "car-outline",
+  "Panel de control": "car-outline",
   "Mis servicios": "clipboard-text-outline",
   Pagos: "credit-card-outline",
   Historial: "history",
@@ -101,13 +134,17 @@ export default function Dashboard() {
   const isMobile = width < 900;
   const [vehiculos, setVehiculos] = useState<Vehiculo[]>([]);
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
+  const [talleres, setTalleres] = useState<Taller[]>([]);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [userName, setUserName] = useState("Usuario");
-  const [selectedSection, setSelectedSection] = useState("Mis vehiculos");
+  const [selectedSection, setSelectedSection] = useState("Panel de control");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
+  const [expandedServiceId, setExpandedServiceId] = useState<string | null>(null);
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  const [serviceStatusFilter, setServiceStatusFilter] = useState<string>("Todos");
   const [newKilometraje, setNewKilometraje] = useState("");
 
   const redirigirAlLogin = () => {
@@ -167,6 +204,8 @@ export default function Dashboard() {
         },
       });
 
+      const talleresResponse = await fetch(`${API_BASE_URL}/talleres`);
+
       const notificacionesResponse = await fetch(`${API_BASE_URL}/notificaciones`, {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -184,11 +223,26 @@ export default function Dashboard() {
 
       const data = await response.json();
       const solicitudesData = await solicitudesResponse.json();
+      const talleresData = await talleresResponse.json();
       const notificacionesData = await notificacionesResponse.json();
       const items = Array.isArray(data) ? data : [];
       setVehiculos(items);
       setSolicitudes(Array.isArray(solicitudesData) ? solicitudesData : []);
+      setTalleres(Array.isArray(talleresData) ? talleresData : []);
       setNotificaciones(Array.isArray(notificacionesData) ? notificacionesData : []);
+
+      const storedSection = await storage.getItem("client_dashboard_section");
+      if (storedSection) {
+        setSelectedSection(storedSection);
+        await storage.removeItem("client_dashboard_section");
+      }
+
+      const storedExpandedServiceId = await storage.getItem("client_dashboard_expand_service_id");
+      if (storedExpandedServiceId) {
+        setExpandedServiceId(storedExpandedServiceId);
+        setSelectedSection("Mis servicios");
+        await storage.removeItem("client_dashboard_expand_service_id");
+      }
 
       if (items[0]?.id != null) {
         if (!selectedVehicleId || !items.some((item) => String(item.id) === String(selectedVehicleId))) {
@@ -204,6 +258,7 @@ export default function Dashboard() {
       console.log("Error cargando vehiculos", error);
       setVehiculos([]);
       setSolicitudes([]);
+      setTalleres([]);
       setNotificaciones([]);
       setSelectedVehicleId(null);
       setEditingVehicleId(null);
@@ -219,9 +274,10 @@ export default function Dashboard() {
     React.useCallback(() => {
       cargarDatos();
 
+      // Optimización: polling cada 30 segundos en lugar de 8 para reducir carga
       const interval = setInterval(() => {
         cargarDatos();
-      }, 8000);
+      }, 30000);
 
       return () => clearInterval(interval);
     }, [])
@@ -240,23 +296,22 @@ export default function Dashboard() {
 
   const totalVehiculos = vehiculos.length;
   const solicitudesCotizacion = solicitudes.filter(
-    (item) => ["pendiente", "cotizando"].includes((item.estado || "").toLowerCase())
+    (item) => isCreatedStatus(item.estado) || isInQuotationStatus(item.estado)
   ).length;
   const solicitudesProceso = solicitudes.filter((item) =>
-    ["diagnostico", "esperando_repuestos", "en_reparacion", "pruebas"].includes(
-      (item.estado || "").toLowerCase()
-    )
+    isQuotedStatus(item.estado) || isSentToClientStatus(item.estado) || normalizeStatus(item.estado) === "aprobada"
   ).length;
   const solicitudesFinalizadas = solicitudes.filter(
-    (item) => (item.estado || "").toLowerCase() === "finalizado"
+    (item) => isRejectedClientStatus(item.estado)
   ).length;
-  const solicitudesHistorial = solicitudes.filter((item) =>
-    ["archivada", "finalizado"].includes((item.estado || "").toLowerCase())
-  );
-  const solicitudesActivas = solicitudes.filter(
-    (item) => !["archivada", "finalizado"].includes((item.estado || "").toLowerCase())
-  );
+  const solicitudesHistorial = solicitudes.filter((item) => isHistoryStatus(item.estado));
+  const solicitudesActivas = solicitudes.filter((item) => isOpenRequestStatus(item.estado));
   const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+  const filteredSolicitudesActivas = (serviceStatusFilter === "Todos"
+    ? solicitudesActivas
+    : solicitudesActivas.filter(
+        (item) => renderEstadoServicio(item.estado).label === serviceStatusFilter
+      )).sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
 
   const extraerSolicitudId = (mensaje?: string) => {
     const match = (mensaje || "").match(/#(\d+)/);
@@ -278,12 +333,14 @@ export default function Dashboard() {
 
     const solicitudId = extraerSolicitudId(item.mensaje);
     const solicitud = solicitudes.find((current) => String(current.id) === String(solicitudId));
-    const estado = (solicitud?.estado || "").toLowerCase();
+    const estado = normalizeStatus(solicitud?.estado);
 
     setShowNotifications(false);
-    setSelectedSection(
-      ["finalizado", "cotizado", "archivada"].includes(estado) ? "Historial" : "Mis servicios"
-    );
+    setSelectedSection(isHistoryStatus(estado) ? "Historial" : "Mis servicios");
+    if (solicitudId) {
+      setExpandedServiceId(solicitudId);
+      setExpandedHistoryId(solicitudId);
+    }
     setNotificaciones((current) =>
       current.map((notification) =>
         notification.id === item.id ? { ...notification, leida: true } : notification
@@ -291,13 +348,7 @@ export default function Dashboard() {
     );
   };
 
-  const normalizarTexto = (value?: string) =>
-    (value || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
+  const normalizarTexto = (value?: string) => normalizeServiceText(value);
 
   const esSolicitudMantenimiento = (tipoServicio?: string) => {
     const servicio = normalizarTexto(tipoServicio);
@@ -311,10 +362,7 @@ export default function Dashboard() {
 
     return partes.some(
       (parte) =>
-        !parte.includes("bateria") &&
-        !parte.includes("llanta") &&
-        !parte.includes("aceite") &&
-        !parte.includes("filtro")
+        !isQuoteWorkflowService(parte)
     );
   };
 
@@ -335,11 +383,11 @@ export default function Dashboard() {
             : [servicioNormalizado];
 
     return solicitudes.some((item) => {
-      const estado = (item.estado || "").toLowerCase();
+      const estado = normalizeStatus(item.estado);
       const servicio = normalizarTexto(item.tipo_servicio);
       return (
         String(item.vehiculo?.id) === String(vehicleId) &&
-        ["pendiente", "cotizando"].includes(estado) &&
+        (isCreatedStatus(estado) || isInQuotationStatus(estado) || isSentToClientStatus(estado)) &&
         palabrasClave.some((palabra) => servicio.includes(palabra))
       );
     });
@@ -349,11 +397,11 @@ export default function Dashboard() {
     if (vehicleId == null) return false;
 
     return solicitudes.some((item) => {
-      const estado = (item.estado || "").toLowerCase();
+      const estado = normalizeStatus(item.estado);
 
       return (
         String(item.vehiculo?.id) === String(vehicleId) &&
-        ["pendiente", "cotizando"].includes(estado) &&
+        (isCreatedStatus(estado) || isInQuotationStatus(estado)) &&
         esSolicitudMantenimiento(item.tipo_servicio)
       );
     });
@@ -387,6 +435,19 @@ export default function Dashboard() {
 
   const confirmarEliminacion = (vehicle: Vehiculo) => {
     const vehicleName = `${vehicle.marca ?? ""} ${vehicle.modelo ?? ""}`.trim() || "este vehiculo";
+    const tieneSolicitudActiva = solicitudes.some(
+      (item) =>
+        String(item.vehiculo?.id) === String(vehicle.id) &&
+        isOpenRequestStatus(item.estado)
+    );
+
+    if (tieneSolicitudActiva) {
+      Alert.alert(
+        "Vehiculo con solicitud activa",
+        "No puedes eliminar este vehiculo mientras tenga una solicitud activa."
+      );
+      return;
+    }
 
     if (Platform.OS === "web") {
       const confirmado = globalThis.confirm?.(`¿Deseas eliminar ${vehicleName}?`);
@@ -492,7 +553,7 @@ export default function Dashboard() {
       }
 
       await cargarDatos();
-      setSelectedSection("Mis servicios");
+      setSelectedSection("Panel de control");
       alert("Solicitud enviada al administrador correctamente");
     } catch (error) {
       console.log("Error creando solicitud rapida", error);
@@ -532,6 +593,11 @@ export default function Dashboard() {
       {vehiculos.map((item) => {
         const selected = String(item.id) === String(selectedVehicleId);
         const isEditing = String(item.id) === String(editingVehicleId);
+        const hasActiveRequest = solicitudes.some(
+          (solicitud) =>
+            String(solicitud.vehiculo?.id) === String(item.id) &&
+            isOpenRequestStatus(solicitud.estado)
+        );
 
         return (
           <View key={String(item.id)} style={styles.cardBlock}>
@@ -647,11 +713,16 @@ export default function Dashboard() {
 
                 <View style={styles.actionRow}>
                   <TouchableOpacity
-                    style={styles.deleteVehicleButton}
+                    style={[
+                      styles.deleteVehicleButton,
+                      hasActiveRequest && styles.deleteVehicleButtonDisabled,
+                    ]}
                     onPress={() => confirmarEliminacion(item)}
                   >
                     <MaterialCommunityIcons name="trash-can-outline" size={18} color="#dc2626" />
-                    <Text style={styles.deleteVehicleText}>Eliminar vehiculo</Text>
+                    <Text style={styles.deleteVehicleText}>
+                      {hasActiveRequest ? "Vehiculo con solicitud activa" : "Eliminar vehiculo"}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -670,47 +741,65 @@ export default function Dashboard() {
     </View>
   );
 
-  const renderEstadoServicio = (estado?: string) => {
-    const normalizado = (estado || "").toLowerCase();
+  const renderBlockedSection = (title: string, icon: string) => (
+    <View style={styles.placeholderCard}>
+      <MaterialCommunityIcons name={icon as any} size={42} color="#94a3b8" />
+      <Text style={styles.placeholderTitle}>{title}</Text>
+      <Text style={styles.placeholderText}>
+        Este modulo esta bloqueado porque todavia no se ha desarrollado.
+      </Text>
+    </View>
+  );
 
-    if (normalizado === "pendiente" || normalizado === "cotizando") {
-      return { label: "Cotizacion", backgroundColor: "#fff7d6", color: "#b7791f" };
+  function renderEstadoServicio(estado?: string) {
+    const normalizado = normalizeStatus(estado);
+    let label = getStatusLabel(normalizado);
+
+    if (isQuotedStatus(normalizado)) {
+      label = "En cotizacion";
     }
 
-    if (normalizado === "diagnostico") {
-      return { label: "Diagnostico", backgroundColor: "#e0f2fe", color: "#0369a1" };
+    if (isSentToClientStatus(normalizado)) {
+      label = "Cotizada";
     }
 
-    if (normalizado === "esperando_repuestos") {
-      return { label: "Esperando repuestos", backgroundColor: "#ede9fe", color: "#6d28d9" };
+    if (
+      isCreatedStatus(normalizado) ||
+      normalizado === "en_revision" ||
+      isInDiagnosisStatus(normalizado) ||
+      isDiagnosedStatus(normalizado) ||
+      isInQuotationStatus(normalizado)
+    ) {
+      return { label, backgroundColor: "#fff7d6", color: "#b7791f" };
     }
 
-    if (normalizado === "en_reparacion") {
-      return { label: "En reparacion", backgroundColor: "#dcfce7", color: "#15803d" };
+    if (
+      isQuotedStatus(normalizado) ||
+      isProposalReadyStatus(normalizado) ||
+      isSentToClientStatus(normalizado) ||
+      normalizado === "aprobada"
+    ) {
+      return { label, backgroundColor: "#dcfce7", color: "#15803d" };
     }
 
-    if (normalizado === "pruebas") {
-      return { label: "Pruebas", backgroundColor: "#e0f2fe", color: "#1d4ed8" };
+    if (isInProcessStatus(normalizado)) {
+      return { label, backgroundColor: "#e0f2fe", color: "#0369a1" };
     }
 
-    if (normalizado === "finalizado") {
-      return { label: "Finalizado", backgroundColor: "#dcfce7", color: "#166534" };
+    if (isFinishedStatus(normalizado)) {
+      return { label, backgroundColor: "#dcfce7", color: "#166534" };
     }
 
-    if (normalizado === "archivada") {
-      return { label: "Archivada", backgroundColor: "#e2e8f0", color: "#475569" };
+    if (isCancelledStatus(normalizado)) {
+      return { label, backgroundColor: "#e2e8f0", color: "#475569" };
     }
 
-    if (normalizado === "devuelta") {
-      return { label: "Devuelta", backgroundColor: "#fee2e2", color: "#b91c1c" };
+    if (isRejectedClientStatus(normalizado) || isRejectedWorkshopStatus(normalizado)) {
+      return { label, backgroundColor: "#fee2e2", color: "#b91c1c" };
     }
 
-    if (normalizado === "enviado_cliente") {
-      return { label: "Cotizacion", backgroundColor: "#dcfce7", color: "#15803d" };
-    }
-
-    return { label: estado || "Cotizacion", backgroundColor: "#eef2ff", color: "#3730a3" };
-  };
+    return { label, backgroundColor: "#eef2ff", color: "#3730a3" };
+  }
 
   const separarValoresCotizacion = (value?: string | null) =>
     (value || "")
@@ -753,6 +842,8 @@ export default function Dashboard() {
     );
 
     return Array.from({ length: total }, (_, index) => ({
+      proveedor_id: null,
+      proveedor_nombre: null,
       marca: marcas[index] || null,
       referencia: referencias[index] || null,
       garantia: garantias[index] || null,
@@ -761,6 +852,68 @@ export default function Dashboard() {
       observacion: observaciones[index] || null,
     }));
   };
+
+  const solicitudPermitePago = (item: Solicitud) => {
+    const estado = (item.estado || "").toLowerCase();
+    const servicio = normalizarTexto(item.tipo_servicio);
+
+    return (
+      isSentToClientStatus(estado) &&
+      isQuoteWorkflowService(servicio)
+    );
+  };
+
+  const aprobarSolicitudCliente = async (solicitudId: string | number | undefined) => {
+    if (solicitudId == null) return;
+
+    try {
+      const token = await storage.getItem("token");
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/aprobar-cliente`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Error", data.detail || "No se pudo aprobar la solicitud");
+        return;
+      }
+
+      await cargarDatos();
+      Alert.alert("Aprobada", "La solicitud fue aprobada y ahora pasa a ejecucion.");
+    } catch (error) {
+      console.log("Error aprobando solicitud cliente", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
+  };
+
+  const obtenerTituloSolicitud = (item: Solicitud) => {
+    const servicio = normalizarTexto(item.tipo_servicio);
+
+    if (servicio.includes("llanta")) return "Solicitud de llantas";
+    if (servicio.includes("bateria")) return "Solicitud de bateria";
+    if (servicio.includes("aceite") || servicio.includes("filtro")) return "Solicitud de aceite";
+
+    return item.tipo_servicio || "Servicio solicitado";
+  };
+
+  const filtrosEstadoCliente = [
+    "Todos",
+    "Creada",
+    "En revision",
+    "En diagnostico",
+    "Diagnosticada",
+    "En cotizacion",
+    "Cotizada",
+    "Propuesta armada",
+    "Enviada al cliente",
+    "Aprobada",
+    "En proceso",
+    "Finalizada",
+  ];
 
   const renderServicesSection = () => {
     if (solicitudesActivas.length === 0) {
@@ -777,21 +930,53 @@ export default function Dashboard() {
 
     return (
       <View style={styles.servicesListSection}>
-        {solicitudesActivas.map((item) => {
+        <View style={styles.filterWrap}>
+          {filtrosEstadoCliente.map((filter) => (
+            <TouchableOpacity
+              key={filter}
+              style={[
+                styles.filterChip,
+                serviceStatusFilter === filter && styles.filterChipActive,
+              ]}
+              onPress={() => setServiceStatusFilter(filter)}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  serviceStatusFilter === filter && styles.filterChipTextActive,
+                ]}
+              >
+                {filter}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        {filteredSolicitudesActivas.map((item) => {
           const estadoInfo = renderEstadoServicio(item.estado);
           const respuestasCliente = obtenerRespuestasCliente(item);
+          const expanded = expandedServiceId === String(item.id);
+          const mostrarTalleres =
+            isSentToClientStatus(item.estado) && esSolicitudMantenimiento(item.tipo_servicio);
 
           return (
-            <View key={String(item.id)} style={styles.serviceRequestCard}>
+            <TouchableOpacity
+              key={String(item.id)}
+              style={styles.serviceRequestCard}
+              activeOpacity={0.96}
+              onPress={() =>
+                setExpandedServiceId((current) => (current === String(item.id) ? null : String(item.id)))
+              }
+            >
               <View style={styles.serviceRequestHeader}>
                 <View style={styles.serviceRequestHeaderContent}>
-                  <Text style={styles.serviceRequestTitle}>
-                    {item.tipo_servicio || "Servicio solicitado"}
-                  </Text>
-                  <Text style={styles.serviceRequestVehicle}>
+                  <Text style={styles.serviceRequestTitle}>{obtenerTituloSolicitud(item)}</Text>
+                    <Text style={styles.serviceRequestVehicle}>
                     {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
                       "Vehiculo"}
                     {item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}
+                    </Text>
+                  <Text style={styles.serviceRequestMeta}>
+                    Fecha y hora de creacion: {formatDateTime(item.fecha)}
                   </Text>
                 </View>
 
@@ -807,17 +992,25 @@ export default function Dashboard() {
                 </View>
               </View>
 
-              <Text style={styles.serviceRequestDescription}>
-                {item.problema || "Solicitud enviada al administrador para revision."}
+              {expanded ? (
+                <>
+                  <Text style={styles.serviceRequestDescription}>
+                    {item.problema || "Solicitud enviada al administrador para revision."}
+                  </Text>
+                  <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
+                </>
+              ) : null}
+              <Text style={styles.quoteExpandHint}>
+                {expanded ? "Toca para ocultar el detalle" : "Toca la tarjeta para ver el detalle"}
               </Text>
 
-              <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
-
-              {(item.estado || "").toLowerCase() === "enviado_cliente" && respuestasCliente.length ? (
+              {expanded && isSentToClientStatus(item.estado) && respuestasCliente.length ? (
                 <View style={styles.clientQuoteList}>
                   {respuestasCliente.map((respuesta, index) => (
                     <View key={`quote-${item.id}-${index}`} style={styles.clientQuoteCard}>
-                      <Text style={styles.clientQuoteTitle}>Cotizacion {index + 1}</Text>
+                      <Text style={styles.clientQuoteTitle}>
+                        {respuesta.proveedor_nombre || `Cotizacion ${index + 1}`}
+                      </Text>
                       <Text style={styles.serviceRequestDescription}>Marca: {respuesta.marca || "Sin marca"}</Text>
                       <Text style={styles.serviceRequestDescription}>
                         Referencia: {respuesta.referencia || "Sin referencia"}
@@ -832,11 +1025,39 @@ export default function Dashboard() {
                       <Text style={styles.serviceRequestDescription}>
                         Observacion: {respuesta.observacion || "Sin observacion"}
                       </Text>
+                      {solicitudPermitePago(item) ? (
+                        <TouchableOpacity
+                          style={styles.payButton}
+                          onPress={() => aprobarSolicitudCliente(item.id)}
+                        >
+                          <Text style={styles.payButtonText}>Pagar</Text>
+                        </TouchableOpacity>
+                      ) : null}
                     </View>
                   ))}
                 </View>
               ) : null}
-            </View>
+
+              {expanded && mostrarTalleres ? (
+                <View style={styles.workshopListCard}>
+                  <Text style={styles.workshopListTitle}>Talleres disponibles</Text>
+                  {talleres.length > 0 ? (
+                    talleres.map((taller) => (
+                      <View key={`taller-${taller.id}`} style={styles.workshopItem}>
+                        <Text style={styles.workshopName}>{taller.nombre || "Taller"}</Text>
+                        <Text style={styles.workshopMeta}>
+                          {taller.email || "Sin email"} {taller.telefono ? `• ${taller.telefono}` : ""}
+                        </Text>
+                      </View>
+                    ))
+                  ) : (
+                    <Text style={styles.serviceRequestDescription}>
+                      No hay talleres disponibles registrados.
+                    </Text>
+                  )}
+                </View>
+              ) : null}
+            </TouchableOpacity>
           );
         })}
       </View>
@@ -857,12 +1078,22 @@ export default function Dashboard() {
         {solicitudesHistorial.map((item) => {
           const estadoInfo = renderEstadoServicio(item.estado);
 
+          const isReturned = isRejectedClientStatus(item.estado);
+          const expanded = expandedHistoryId === String(item.id);
+
           return (
-            <View key={`history-${item.id}`} style={styles.serviceRequestCard}>
+            <TouchableOpacity
+              key={`history-${item.id}`}
+              style={styles.serviceRequestCard}
+              activeOpacity={0.96}
+              onPress={() =>
+                setExpandedHistoryId((current) => (current === String(item.id) ? null : String(item.id)))
+              }
+            >
               <View style={styles.serviceRequestHeader}>
                 <View style={styles.serviceRequestHeaderContent}>
                   <Text style={styles.serviceRequestTitle}>
-                    {item.tipo_servicio || "Servicio solicitado"}
+                    {obtenerTituloSolicitud(item)}
                   </Text>
                   <Text style={styles.serviceRequestVehicle}>
                     {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
@@ -883,11 +1114,31 @@ export default function Dashboard() {
                 </View>
               </View>
 
-              <Text style={styles.serviceRequestDescription}>
-                {item.problema || "Solicitud enviada al administrador para revision."}
-              </Text>
-              <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
-            </View>
+              {expanded || !isReturned ? (
+                <>
+                  <Text style={styles.serviceRequestVehicle}>
+                    {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
+                      "Vehiculo"}
+                    {item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    {item.problema || "Solicitud enviada al administrador para revision."}
+                  </Text>
+                  <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
+                  <Text style={styles.serviceRequestMeta}>
+                    Fecha y hora de creacion: {formatDateTime(item.fecha)}
+                  </Text>
+                  {isRejectedClientStatus(item.estado) && item.cotizacion?.observacion ? (
+                    <View style={styles.returnReasonCard}>
+                      <Text style={styles.returnReasonTitle}>Motivo de devolucion</Text>
+                      <Text style={styles.serviceRequestDescription}>{item.cotizacion.observacion}</Text>
+                    </View>
+                  ) : null}
+                </>
+              ) : (
+                <Text style={styles.quoteExpandHint}>Toca la tarjeta para ver el detalle</Text>
+              )}
+            </TouchableOpacity>
           );
         })}
       </View>
@@ -951,11 +1202,16 @@ export default function Dashboard() {
                 <Text style={styles.sidebarWelcome}>Bienvenido</Text>
 
                 {clientSections.map((section) => (
+                  (() => {
+                    const isBlocked = ["Pagos", "Soporte", "Configuracion"].includes(section);
+
+                    return (
                   <TouchableOpacity
                     key={section}
                     style={[
                       styles.sidebarItem,
                       selectedSection === section && styles.sidebarItemActive,
+                      isBlocked && styles.sidebarItemBlocked,
                     ]}
                     onPress={() => {
                       setSelectedSection(section);
@@ -975,7 +1231,12 @@ export default function Dashboard() {
                     >
                       {section}
                     </Text>
+                    {isBlocked ? (
+                      <MaterialCommunityIcons name="lock-outline" size={16} color="#8fa1c2" />
+                    ) : null}
                   </TouchableOpacity>
+                    );
+                  })()
                 ))}
 
               </View>
@@ -983,23 +1244,25 @@ export default function Dashboard() {
           </View>
 
           {showNotifications ? (
-            <View style={styles.notificationsDropdown}>
-              <Text style={styles.notificationsTitle}>Notificaciones</Text>
-              {notificaciones.length > 0 ? (
-                notificaciones.map((item) => (
-                  <TouchableOpacity
-                    key={String(item.id)}
-                    style={styles.notificationItem}
-                    activeOpacity={0.9}
-                    onPress={() => abrirDesdeNotificacion(item)}
-                  >
-                    <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
-                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
-                  </TouchableOpacity>
-                ))
-              ) : (
-                <Text style={styles.subtitle}>No tienes notificaciones nuevas.</Text>
-              )}
+            <View style={styles.notificationsOverlay}>
+              <Pressable style={styles.notificationsBackdrop} onPress={() => setShowNotifications(false)} />
+              <View style={styles.notificationsDropdown}>
+                <Text style={styles.notificationsTitle}>Notificaciones</Text>
+                {notificaciones.length > 0 ? (
+                  notificaciones.map((item) => (
+                    <TouchableOpacity
+                      key={String(item.id)}
+                      style={styles.notificationItem}
+                      activeOpacity={0.9}
+                      onPress={() => abrirDesdeNotificacion(item)}
+                    >
+                      <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.subtitle}>No tienes notificaciones nuevas.</Text>
+                )}
+              </View>
             </View>
           ) : null}
 
@@ -1019,7 +1282,7 @@ export default function Dashboard() {
                 <View style={[styles.statCard, isMobile && styles.statCardMobile]}>
                   <View style={[styles.statBar, { backgroundColor: "#2f8fff" }]} />
                   <Text style={styles.statValue}>{totalVehiculos}</Text>
-                  <Text style={styles.statLabel}>Mis vehiculos</Text>
+                  <Text style={styles.statLabel}>Panel de control</Text>
                 </View>
                 <View style={[styles.statCard, isMobile && styles.statCardMobile]}>
                   <View style={[styles.statBar, { backgroundColor: "#ff8a3d" }]} />
@@ -1029,12 +1292,12 @@ export default function Dashboard() {
                 <View style={[styles.statCard, isMobile && styles.statCardMobile]}>
                   <View style={[styles.statBar, { backgroundColor: "#23b26d" }]} />
                   <Text style={styles.statValue}>{solicitudesProceso}</Text>
-                  <Text style={styles.statLabel}>En proceso</Text>
+                  <Text style={styles.statLabel}>Cotizado</Text>
                 </View>
                 <View style={[styles.statCard, isMobile && styles.statCardMobile]}>
                   <View style={[styles.statBar, { backgroundColor: "#7b61ff" }]} />
                   <Text style={styles.statValue}>{solicitudesFinalizadas}</Text>
-                  <Text style={styles.statLabel}>Finalizados</Text>
+                  <Text style={styles.statLabel}>Devueltos</Text>
                 </View>
               </View>
 
@@ -1047,9 +1310,9 @@ export default function Dashboard() {
                 </View>
                 <TouchableOpacity
                   style={styles.dashboardHeroButton}
-                  onPress={() => setSelectedSection("Mis vehiculos")}
+                  onPress={() => setSelectedSection("Panel de control")}
                 >
-                  <Text style={styles.dashboardHeroButtonText}>Ir a Mis vehiculos</Text>
+                  <Text style={styles.dashboardHeroButtonText}>Ir a Panel de control</Text>
                 </TouchableOpacity>
               </View>
 
@@ -1076,10 +1339,10 @@ export default function Dashboard() {
             </View>
           ) : null}
 
-          {selectedSection === "Mis vehiculos" ? (
+          {selectedSection === "Panel de control" ? (
             <>
               <View style={[styles.vehiclesHeader, isMobile && styles.vehiclesHeaderMobile]}>
-                <Text style={styles.vehiclesSectionTitle}>Mis vehiculos</Text>
+                <Text style={styles.vehiclesSectionTitle}>Panel de control</Text>
                 <TouchableOpacity
                   style={styles.registerButton}
                   onPress={() => router.push("/vehicles/create" as any)}
@@ -1093,26 +1356,14 @@ export default function Dashboard() {
           ) : null}
           {selectedSection === "Mis servicios" ? renderServicesSection() : null}
           {selectedSection === "Pagos"
-            ? renderPlaceholderSection(
-                "Pagos",
-                "Esta seccion mostrara pagos pendientes, recibidos y facturas.",
-                "credit-card-outline"
-              )
+            ? renderBlockedSection("Pagos", "credit-card-outline")
             : null}
           {selectedSection === "Historial" ? renderHistorySection() : null}
           {selectedSection === "Soporte"
-            ? renderPlaceholderSection(
-                "Soporte",
-                "Esta area servira para ayuda, contacto y seguimiento de casos.",
-                "lifebuoy"
-              )
+            ? renderBlockedSection("Soporte", "lifebuoy")
             : null}
           {selectedSection === "Configuracion"
-            ? renderPlaceholderSection(
-                "Configuracion",
-                "Aqui podras ajustar preferencias, perfil y notificaciones.",
-                "cog-outline"
-              )
+            ? renderBlockedSection("Configuracion", "cog-outline")
             : null}
         </View>
       </View>
@@ -1213,6 +1464,7 @@ const styles = StyleSheet.create({
   sidebarItem: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     gap: 10,
     borderRadius: 16,
     paddingVertical: 12,
@@ -1222,10 +1474,14 @@ const styles = StyleSheet.create({
   sidebarItemActive: {
     backgroundColor: "#dfe9f7",
   },
+  sidebarItemBlocked: {
+    opacity: 0.72,
+  },
   sidebarItemText: {
     color: "#c2cbe0",
     fontSize: 15,
     fontWeight: "600",
+    flex: 1,
   },
   sidebarItemTextActive: {
     color: "#08121f",
@@ -1310,12 +1566,24 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
   notificationsDropdown: {
+    position: "absolute",
+    top: 78,
+    right: 0,
+    left: 0,
     backgroundColor: "#ffffff",
     borderRadius: 22,
     padding: 18,
     borderWidth: 1,
     borderColor: "#dbe4f0",
     marginBottom: 18,
+    zIndex: 30,
+  },
+  notificationsOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 25,
+  },
+  notificationsBackdrop: {
+    ...StyleSheet.absoluteFillObject,
   },
   notificationsTitle: {
     color: "#162033",
@@ -1432,6 +1700,27 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 12,
+  },
+  filterWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  filterChip: {
+    backgroundColor: "#eef3f9",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  filterChipActive: {
+    backgroundColor: "#dbeafe",
+  },
+  filterChipText: {
+    color: "#425066",
+    fontWeight: "700",
+  },
+  filterChipTextActive: {
+    color: "#1d4ed8",
   },
   summaryCard: {
     flex: 1,
@@ -1556,6 +1845,12 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontWeight: "700",
   },
+  quoteExpandHint: {
+    color: "#64748b",
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: "700",
+  },
   clientQuoteList: {
     gap: 12,
     marginTop: 14,
@@ -1571,6 +1866,59 @@ const styles = StyleSheet.create({
     color: "#166534",
     fontWeight: "800",
     marginBottom: 8,
+  },
+  payButton: {
+    marginTop: 12,
+    alignSelf: "flex-start",
+    backgroundColor: "#16a34a",
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  payButtonText: {
+    color: "#ffffff",
+    fontWeight: "800",
+  },
+  workshopListCard: {
+    marginTop: 14,
+    backgroundColor: "#f8fbff",
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#d7e4fb",
+    gap: 10,
+  },
+  workshopListTitle: {
+    color: "#102447",
+    fontWeight: "800",
+  },
+  workshopItem: {
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "#e8edf6",
+  },
+  workshopName: {
+    color: "#102447",
+    fontWeight: "800",
+  },
+  workshopMeta: {
+    color: "#64748b",
+    marginTop: 4,
+  },
+  returnReasonCard: {
+    marginTop: 12,
+    backgroundColor: "#fff1f2",
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#fecdd3",
+  },
+  returnReasonTitle: {
+    color: "#be123c",
+    fontWeight: "800",
+    marginBottom: 6,
   },
   cardBlock: {
     gap: 12,
@@ -1740,6 +2088,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 10,
+  },
+  deleteVehicleButtonDisabled: {
+    opacity: 0.7,
   },
   deleteVehicleText: {
     color: "#dc2626",

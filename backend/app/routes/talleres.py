@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -11,6 +11,10 @@ router = APIRouter(prefix="/talleres", tags=["Talleres"])
 
 @router.post("/register")
 def register_taller(data: UsuarioCreate, db: Session = Depends(get_db)):
+    usuario_existente = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if usuario_existente:
+        raise HTTPException(status_code=400, detail="El email ya esta registrado")
 
     usuario = Usuario(
         nombre=data.nombre,

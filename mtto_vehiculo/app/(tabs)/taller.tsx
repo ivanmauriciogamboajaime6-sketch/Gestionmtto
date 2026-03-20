@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View,
@@ -12,150 +14,152 @@ import {
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
+import { formatDateTime } from "../../constants/formatters";
+import {
+  getStatusLabel,
+  isApprovedStatus,
+  isDiagnosedStatus,
+  isFinishedStatus,
+  isInDiagnosisStatus,
+  isInProcessStatus,
+  isRejectedWorkshopStatus,
+  normalizeStatus,
+} from "../../constants/request-status";
 import storage from "../../constants/storage";
 
 type Solicitud = {
   id?: number | string;
-  vehiculo?: {
-    marca?: string;
-    modelo?: string;
-    placa?: string;
-  };
-  cliente?: {
-    nombre?: string;
-  };
+  vehiculo?: { marca?: string; modelo?: string; placa?: string };
+  cliente?: { nombre?: string };
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  fecha?: string | null;
+  taller_diagnostico?: {
+    diagnostico?: string | null;
+    servicios?: string | null;
+    horas?: string | null;
+    materiales?: string | null;
+  };
 };
 
 type Notificacion = {
   id?: number | string;
   titulo?: string;
   mensaje?: string;
-  tipo?: string;
   leida?: boolean;
 };
 
-type KanbanCard = {
-  id: string;
-  estado: "diagnostico" | "repuestos" | "intervencion" | "listos";
-  vehiculo: string;
-  placa: string;
-  cliente?: string;
-  problema?: string;
-  repuestos?: string[];
-  proveedor?: string;
-  entrega?: string;
-  trabajo?: string;
-  mecanico?: string;
-  costo?: string;
-  accion: string;
-};
-
-const menuItems = [
-  { label: "Vista general", icon: "view-dashboard-outline", active: true },
-  { label: "Recepcion", icon: "car-arrow-right" },
+const sections = [
+  { label: "Vista general", icon: "view-dashboard-outline" },
+  { label: "Solicitudes recibidas", icon: "inbox-arrow-down-outline" },
   { label: "Diagnostico", icon: "stethoscope" },
-  { label: "Reparaciones", icon: "tools" },
-  { label: "Repuestos", icon: "package-variant-closed" },
-  { label: "Facturacion", icon: "receipt-text-outline" },
+  { label: "Intervencion", icon: "tools" },
+  { label: "Materiales / Repuestos", icon: "package-variant-closed" },
+  { label: "Entrega / Informe", icon: "clipboard-text-outline" },
   { label: "Historial", icon: "history" },
-  { label: "Configuracion", icon: "cog-outline" },
-];
-
-const mechanics = [
-  { name: "Carlos Ruiz", vehicles: 2, color: "#ff8a3d" },
-  { name: "Pedro Gomez", vehicles: 1, color: "#1e88e5" },
-  { name: "Luis Herrera", vehicles: 3, color: "#23b26d" },
-];
-
-const spareParts = [
-  "Bomba gasolina",
-  "Filtro aire",
-  "Pastillas freno",
-  "Sensor oxigeno",
-];
-
-const fallbackBoard: KanbanCard[] = [
-  {
-    id: "diag-1",
-    estado: "diagnostico",
-    vehiculo: "Mazda 3",
-    placa: "KHT234",
-    cliente: "Juan Perez",
-    problema: "Ruido suspension",
-    accion: "Diagnosticar",
-  },
-  {
-    id: "rep-1",
-    estado: "repuestos",
-    vehiculo: "Toyota Hilux",
-    placa: "JKS882",
-    repuestos: ["Pastillas freno", "Disco freno"],
-    proveedor: "AutoParts SAS",
-    entrega: "Manana",
-    accion: "Ver repuestos",
-  },
-  {
-    id: "int-1",
-    estado: "intervencion",
-    vehiculo: "Chevrolet Spark",
-    placa: "LMT901",
-    trabajo: "Cambio embrague",
-    mecanico: "Carlos Ruiz",
-    accion: "Ver avance",
-  },
-  {
-    id: "listo-1",
-    estado: "listos",
-    vehiculo: "Nissan Frontier",
-    placa: "MND345",
-    trabajo: "Trabajo finalizado",
-    costo: "$850.000",
-    accion: "Entregar vehiculo",
-  },
-];
-
-const columns = [
-  { key: "diagnostico", title: "Diagnostico", accent: "#ff8a3d" },
-  { key: "repuestos", title: "Esperando repuestos", accent: "#f4b400" },
-  { key: "intervencion", title: "En intervencion", accent: "#1e88e5" },
-  { key: "listos", title: "Listos", accent: "#23b26d" },
 ] as const;
 
-function normalizeEstado(estado?: string): KanbanCard["estado"] {
-  const value = (estado || "").toLowerCase();
+const priorities = {
+  alta: { bg: "#fee2e2", border: "#fecaca", text: "#b91c1c" },
+  media: { bg: "#fef3c7", border: "#fde68a", text: "#b45309" },
+  baja: { bg: "#dcfce7", border: "#86efac", text: "#15803d" },
+};
 
-  if (value.includes("repuesto")) return "repuestos";
-  if (value.includes("repar") || value.includes("interv")) return "intervencion";
-  if (value.includes("listo") || value.includes("entrega")) return "listos";
-  return "diagnostico";
-}
+const getToken = async () => {
+  const browserToken = globalThis.localStorage?.getItem("token");
+  if (browserToken) return browserToken;
+  return storage.getItem("token");
+};
 
-function mapSolicitudesToBoard(solicitudes: Solicitud[]): KanbanCard[] {
-  return solicitudes.map((s, index) => ({
-    id: String(s.id ?? `sol-${index}`),
-    estado: normalizeEstado(s.estado),
-    vehiculo: [s.vehiculo?.marca, s.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo sin nombre",
-    placa: s.vehiculo?.placa || "Sin placa",
-    cliente: s.cliente?.nombre || "Cliente pendiente",
-    problema: s.problema || s.tipo_servicio || "Revision general",
-    trabajo: s.tipo_servicio || "Servicio en proceso",
-    accion: normalizeEstado(s.estado) === "listos" ? "Entregar vehiculo" : "Ver detalle",
-  }));
-}
+const getVehicleName = (item: Solicitud) =>
+  [item.vehiculo?.marca, item.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo sin nombre";
+
+const getRequestTitle = (tipoServicio?: string) => {
+  const value = (tipoServicio || "").toLowerCase();
+  if (value.includes("llanta")) return "Solicitud de llantas";
+  if (value.includes("bateria")) return "Solicitud de bateria";
+  if (value.includes("aceite") || value.includes("filtro")) return "Solicitud de aceite";
+  return tipoServicio || "Solicitud de mantenimiento";
+};
+
+const getStateLabel = (value?: string) => {
+  const state = normalizeStatus(value);
+  if (state === "creada") return "Creada";
+  return getStatusLabel(state);
+};
+
+const getPriority = (item: Solicitud): keyof typeof priorities => {
+  const service = (item.tipo_servicio || "").toLowerCase();
+  const problem = (item.problema || "").toLowerCase();
+  if (service.includes("freno") || service.includes("motor") || problem.includes("seguridad")) return "alta";
+  if (service.includes("bateria") || service.includes("llanta") || service.includes("aceite")) return "media";
+  return "baja";
+};
+
+const extractOrderId = (item: Notificacion) => {
+  const match = `${item.titulo || ""} ${item.mensaje || ""}`.match(/#(\d+)/);
+  return match?.[1] || null;
+};
 
 export default function TallerDashboard() {
   const router = useRouter();
   const { width } = useWindowDimensions();
-  const isMobile = width < 900;
-  const boardColumnWidth = isMobile ? Math.max(width - 72, 260) : 280;
+  const isMobile = width < 960;
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [tallerName, setTallerName] = useState("Taller");
+  const [selectedSection, setSelectedSection] = useState("Vista general");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
+  const [openQuoteFormId, setOpenQuoteFormId] = useState<string | null>(null);
+  const [quoteForms, setQuoteForms] = useState<
+    Record<string, { diagnostico: string; servicios: string; horas: string; materiales: string }>
+  >({});
+
+  useEffect(() => {
+    cargarDashboard();
+  }, []);
+
+  const cargarDashboard = async () => {
+    await Promise.all([cargarSolicitudes(), cargarNotificaciones()]);
+  };
+
+  const cargarSolicitudes = async () => {
+    try {
+      const storedName = await storage.getItem("user_name");
+      const token = await getToken();
+
+      if (storedName) setTallerName(storedName);
+
+      const response = await fetch(`${API_BASE_URL}/solicitudes`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      if (Array.isArray(data)) setSolicitudes(data);
+      else if (Array.isArray(data?.solicitudes)) setSolicitudes(data.solicitudes);
+      else setSolicitudes([]);
+    } catch (error) {
+      console.log("error cargando solicitudes taller", error);
+      setSolicitudes([]);
+    }
+  };
+
+  const cargarNotificaciones = async () => {
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/notificaciones`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setNotificaciones(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.log("error cargando notificaciones taller", error);
+      setNotificaciones([]);
+    }
+  };
 
   const cerrarSesion = async () => {
     try {
@@ -163,12 +167,13 @@ export default function TallerDashboard() {
       await storage.removeItem("user_name");
       await storage.removeItem("user_role");
     } catch (error) {
-      console.log("AsyncStorage logout fallback", error);
+      console.log("logout storage fallback", error);
     }
 
     globalThis.localStorage?.removeItem("token");
     globalThis.localStorage?.removeItem("user_name");
     globalThis.localStorage?.removeItem("user_role");
+
     if (Platform.OS === "web") {
       window.location.href = "/";
       return;
@@ -176,63 +181,9 @@ export default function TallerDashboard() {
     router.replace("/");
   };
 
-  useEffect(() => {
-    cargarSolicitudes();
-    cargarNotificaciones();
-  }, []);
-
-  const cargarSolicitudes = async () => {
+  const actualizarEstadoSolicitud = async (solicitudId: string, estado: string, successMessage: string) => {
     try {
-      const storedName = await storage.getItem("user_name");
-      const token = await storage.getItem("token");
-
-      if (storedName) {
-        setTallerName(storedName);
-      }
-
-      const response = await fetch(`${API_BASE_URL}/solicitudes`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const data = await response.json();
-
-      if (Array.isArray(data)) {
-        setSolicitudes(data);
-      } else if (Array.isArray(data?.solicitudes)) {
-        setSolicitudes(data.solicitudes);
-      } else {
-        console.log("Respuesta inesperada en /solicitudes", data);
-        setSolicitudes([]);
-      }
-    } catch (error) {
-      console.log("error cargando solicitudes", error);
-      setSolicitudes([]);
-    }
-  };
-
-  const cargarNotificaciones = async () => {
-    try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/notificaciones`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const data = await response.json();
-      setNotificaciones(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.log("error cargando notificaciones", error);
-      setNotificaciones([]);
-    }
-  };
-
-  const actualizarEstadoSolicitud = async (solicitudId: string, estado: string) => {
-    try {
-      const token = await storage.getItem("token");
-
+      const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
         method: "PATCH",
         headers: {
@@ -241,7 +192,6 @@ export default function TallerDashboard() {
         },
         body: JSON.stringify({ estado }),
       });
-
       const data = await response.json();
 
       if (!response.ok) {
@@ -250,58 +200,111 @@ export default function TallerDashboard() {
       }
 
       await cargarSolicitudes();
+      Alert.alert("Actualizado", successMessage);
     } catch (error) {
-      console.log("error actualizando solicitud", error);
-      Alert.alert("Error", "No se pudo conectar al servidor");
+      console.log("error actualizando solicitud taller", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
     }
   };
 
-  const assignedSolicitudes = solicitudes.filter(
-    (item) => (item.estado || "").toLowerCase() !== "pendiente"
-  );
-
-  const liveBoard = mapSolicitudesToBoard(assignedSolicitudes);
-  const board = liveBoard.length > 0 ? liveBoard : fallbackBoard;
-  const pendingRequests = assignedSolicitudes.filter((item) =>
-    ["diagnostico", "asignada"].includes((item.estado || "").toLowerCase())
-  );
-
-  const resumen = {
-    vehiculosHoy: 12,
-    diagnostico: board.filter((item) => item.estado === "diagnostico").length,
-    reparacion: board.filter((item) => item.estado === "intervencion").length,
-    repuestos: board.filter((item) => item.estado === "repuestos").length,
-    listos: board.filter((item) => item.estado === "listos").length,
+  const actualizarCampoCotizacion = (
+    solicitudId: string,
+    field: "diagnostico" | "servicios" | "horas" | "materiales",
+    value: string
+  ) => {
+    setQuoteForms((current) => ({
+      ...current,
+      [solicitudId]: {
+        diagnostico: current[solicitudId]?.diagnostico || "",
+        servicios: current[solicitudId]?.servicios || "",
+        horas: current[solicitudId]?.horas || "",
+        materiales: current[solicitudId]?.materiales || "",
+        [field]: value,
+      },
+    }));
   };
 
-  const indicadores = [
-    { label: "Servicios hoy", value: "12", icon: "car-wrench", color: "#1e88e5" },
-    { label: "Tiempo promedio", value: "6h", icon: "clock-outline", color: "#ff8a3d" },
-    { label: "Entregados", value: "7", icon: "check-decagram-outline", color: "#23b26d" },
-    { label: "Ingresos", value: "$4.500.000", icon: "cash-multiple", color: "#8e24aa" },
-  ];
-  const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+  const abrirFormularioCotizacion = (item: Solicitud) => {
+    const solicitudId = String(item.id ?? "");
+    setOpenQuoteFormId((current) => (current === solicitudId ? null : solicitudId));
+    setExpandedRequestId(solicitudId);
+    setQuoteForms((current) => ({
+      ...current,
+      [solicitudId]: current[solicitudId] || {
+        diagnostico: item.taller_diagnostico?.diagnostico || "",
+        servicios: item.taller_diagnostico?.servicios || "",
+        horas: item.taller_diagnostico?.horas || "",
+        materiales: item.taller_diagnostico?.materiales || "",
+      },
+    }));
+  };
 
-  const extraerSolicitudId = (mensaje?: string) => {
-    const match = (mensaje || "").match(/#(\d+)/);
-    return match?.[1] || null;
+  const enviarCotizacionTaller = async (item: Solicitud) => {
+    const solicitudId = String(item.id ?? "");
+    const form = quoteForms[solicitudId] || {
+      diagnostico: "",
+      servicios: "",
+      horas: "",
+      materiales: "",
+    };
+
+    if (!form.diagnostico.trim() || !form.servicios.trim() || !form.horas.trim() || !form.materiales.trim()) {
+      Alert.alert("Campos requeridos", "Debes completar diagnostico, servicios, horas y materiales.");
+      return;
+    }
+
+    if (!/^\d{1,2}(:\d{2})?$/.test(form.horas.trim())) {
+      Alert.alert("Formato invalido", "Las horas deben ir en formato 2 o 02:30.");
+      return;
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/diagnostico-taller`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          diagnostico: form.diagnostico.trim(),
+          servicios: form.servicios.trim(),
+          horas: form.horas.trim(),
+          materiales: form.materiales.trim(),
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion al administrador");
+        return;
+      }
+
+      setOpenQuoteFormId(null);
+      await cargarSolicitudes();
+      Alert.alert("Enviado", "La cotizacion y el diagnostico fueron enviados al administrador.");
+    } catch (error) {
+      console.log("error enviando diagnostico taller", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
   };
 
   const abrirDesdeNotificacion = async (item: Notificacion) => {
     try {
-      const token = await storage.getItem("token");
+      const token = await getToken();
       await fetch(`${API_BASE_URL}/notificaciones/${item.id}/leer`, {
         method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       });
     } catch (error) {
       console.log("error marcando notificacion taller", error);
     }
 
-    const solicitudId = extraerSolicitudId(item.mensaje);
+    const solicitudId = extractOrderId(item);
     setHighlightedOrderId(solicitudId);
+    setExpandedRequestId(solicitudId);
+    setSelectedSection("Solicitudes recibidas");
     setShowNotifications(false);
     setNotificaciones((current) =>
       current.map((notification) =>
@@ -310,59 +313,419 @@ export default function TallerDashboard() {
     );
   };
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.screenContent}>
-      <View style={[styles.layout, isMobile && styles.layoutMobile]}>
-        <View style={[styles.sidebar, isMobile && styles.sidebarMobile]}>
-          <View style={styles.sidebarHeader}>
-            <View style={styles.logoBox}>
-              <MaterialCommunityIcons name="car-cog" size={24} color="#fff" />
+  const workshopRequests = useMemo(
+    () =>
+      solicitudes.filter((item) => {
+        const state = normalizeStatus(item.estado);
+        return !["cotizando", "cotizado", "devuelta", "devuelto_proveedor", "omitida_admin", "archivada", "enviado_cliente"].includes(state);
+      }),
+    [solicitudes]
+  );
+
+  const requestsReceived = useMemo(
+    () => workshopRequests.filter((item) => isInDiagnosisStatus(item.estado)),
+    [workshopRequests]
+  );
+  const diagnosticRequests = useMemo(
+    () => workshopRequests.filter((item) => isInDiagnosisStatus(item.estado)),
+    [workshopRequests]
+  );
+  const waitingAdminRequests = useMemo(
+    () => workshopRequests.filter((item) => isDiagnosedStatus(item.estado)),
+    [workshopRequests]
+  );
+  const approvedRequests = useMemo(
+    () => workshopRequests.filter((item) => isApprovedStatus(item.estado)),
+    [workshopRequests]
+  );
+  const inProgressRequests = useMemo(
+    () => workshopRequests.filter((item) => isInProcessStatus(item.estado)),
+    [workshopRequests]
+  );
+  const finishedRequests = useMemo(
+    () => workshopRequests.filter((item) => isFinishedStatus(item.estado)),
+    [workshopRequests]
+  );
+  const returnedRequests = useMemo(
+    () => workshopRequests.filter((item) => isRejectedWorkshopStatus(item.estado)),
+    [workshopRequests]
+  );
+  const delayedRequests = useMemo(
+    () =>
+      workshopRequests.filter((item) => {
+        if (!item.fecha) return false;
+        const created = new Date(item.fecha).getTime();
+        if (Number.isNaN(created)) return false;
+        return Date.now() - created > 1000 * 60 * 60 * 48 && !isFinishedStatus(item.estado);
+      }),
+    [workshopRequests]
+  );
+
+  const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+  const kpis = [
+    { label: "Solicitudes nuevas", value: requestsReceived.length, color: "#2563eb" },
+    { label: "En diagnostico", value: diagnosticRequests.length, color: "#f97316" },
+    { label: "En reparacion", value: inProgressRequests.length, color: "#16a34a" },
+    { label: "Pendientes admin", value: waitingAdminRequests.length, color: "#7c3aed" },
+    { label: "Finalizadas", value: finishedRequests.length, color: "#0f766e" },
+  ];
+
+  const renderRequestCard = (
+    item: Solicitud,
+    options?: {
+      showQuote?: boolean;
+      showReturn?: boolean;
+      showDiagnosticSend?: boolean;
+      showStart?: boolean;
+      showProgress?: boolean;
+      showFinish?: boolean;
+      showInfo?: boolean;
+    }
+  ) => {
+    const id = String(item.id ?? "");
+    const isExpanded = expandedRequestId === id;
+    const isHighlighted = highlightedOrderId === id;
+    const priority = priorities[getPriority(item)];
+    const isQuoteFormOpen = openQuoteFormId === id;
+    const quoteForm = quoteForms[id] || {
+      diagnostico: item.taller_diagnostico?.diagnostico || "",
+      servicios: item.taller_diagnostico?.servicios || "",
+      horas: item.taller_diagnostico?.horas || "",
+      materiales: item.taller_diagnostico?.materiales || "",
+    };
+
+    return (
+      <TouchableOpacity
+        key={id}
+        style={[styles.requestCard, isHighlighted && styles.highlightedCard]}
+        activeOpacity={0.92}
+        onPress={() => setExpandedRequestId((current) => (current === id ? null : id))}
+      >
+        <View style={styles.requestHeader}>
+          <View style={styles.requestHeaderMain}>
+            <Text style={styles.requestTitle}>Orden #{item.id}</Text>
+            <Text style={styles.requestSubtitle}>{getRequestTitle(item.tipo_servicio)}</Text>
+          </View>
+          <View style={styles.statePill}>
+            <Text style={styles.statePillText}>{getStateLabel(item.estado)}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.metaText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
+        <Text style={styles.metaText}>Vehiculo: {getVehicleName(item)}</Text>
+        <Text style={styles.metaText}>Problema: {item.problema || "Sin descripcion"}</Text>
+        <Text style={styles.metaText}>Fecha: {formatDateTime(item.fecha)}</Text>
+
+        <View style={[styles.priorityPill, { backgroundColor: priority.bg, borderColor: priority.border }]}>
+          <Text style={[styles.priorityText, { color: priority.text }]}>Prioridad {getPriority(item)}</Text>
+        </View>
+
+        <Text style={styles.expandHint}>{isExpanded ? "Toca para ocultar detalle" : "Toca para ver detalle"}</Text>
+
+        {isExpanded ? (
+          <View style={styles.expandedBlock}>
+            <Text style={styles.expandedText}>Placa: {item.vehiculo?.placa || "Sin placa"}</Text>
+            <Text style={styles.expandedText}>Servicio: {item.tipo_servicio || "Sin servicio"}</Text>
+            <Text style={styles.expandedText}>Recepcion en taller: {formatDateTime(item.fecha)}</Text>
+            {options?.showInfo ? (
+              <View style={styles.infoBanner}>
+                <MaterialCommunityIcons name="information-outline" size={18} color="#2563eb" />
+                <Text style={styles.infoBannerText}>El administrador aprueba y el taller ejecuta y reporta.</Text>
+              </View>
+            ) : null}
+            <View style={styles.actionRow}>
+              {options?.showQuote ? (
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => abrirFormularioCotizacion(item)}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {isQuoteFormOpen ? "Ocultar formulario" : "Cotizar"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showReturn ? (
+                <TouchableOpacity
+                  style={styles.dangerButton}
+                  onPress={() => actualizarEstadoSolicitud(id, "rechazada_taller", "La solicitud fue devuelta al administrador.")}
+                >
+                  <Text style={styles.dangerButtonText}>Devolver</Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showDiagnosticSend ? (
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => actualizarEstadoSolicitud(id, "diagnosticada", "El diagnostico fue enviado al administrador.")}
+                >
+                  <Text style={styles.primaryButtonText}>Enviar diagnostico</Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showStart ? (
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => actualizarEstadoSolicitud(id, "en_proceso", "El trabajo fue iniciado.")}
+                >
+                  <Text style={styles.primaryButtonText}>Iniciar trabajo</Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showProgress ? (
+                <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert("Progreso", "La orden sigue en proceso.")}>
+                  <Text style={styles.secondaryButtonText}>Actualizar progreso</Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showFinish ? (
+                <TouchableOpacity
+                  style={styles.successButton}
+                  onPress={() => actualizarEstadoSolicitud(id, "finalizada", "La orden fue finalizada.")}
+                >
+                  <Text style={styles.successButtonText}>Finalizar</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
-            <View>
-              <Text style={styles.sidebarEyebrow}>Taller</Text>
-              <Text style={styles.sidebarTitle}>RenovAutos</Text>
-            </View>
+
+            {options?.showQuote && isQuoteFormOpen ? (
+              <View style={styles.quoteFormCard}>
+                <Text style={styles.quoteFormTitle}>Cotizacion del taller</Text>
+
+                <Text style={styles.quoteFormLabel}>Diagnostico</Text>
+                <TextInput
+                  style={[styles.quoteInput, styles.quoteInputMultiline]}
+                  value={quoteForm.diagnostico}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "diagnostico", value)}
+                  placeholder="Describe el diagnostico realizado"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                />
+
+                <Text style={styles.quoteFormLabel}>Servicios</Text>
+                <TextInput
+                  style={[styles.quoteInput, styles.quoteInputMultiline]}
+                  value={quoteForm.servicios}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "servicios", value)}
+                  placeholder="Servicios que se deben realizar"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                />
+
+                <Text style={styles.quoteFormLabel}>Horas</Text>
+                <TextInput
+                  style={styles.quoteInput}
+                  value={quoteForm.horas}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "horas", value)}
+                  placeholder="02:30"
+                  placeholderTextColor="#94a3b8"
+                />
+
+                <Text style={styles.quoteFormLabel}>Materiales</Text>
+                <TextInput
+                  style={[styles.quoteInput, styles.quoteInputMultiline]}
+                  value={quoteForm.materiales}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "materiales", value)}
+                  placeholder="Materiales y repuestos necesarios"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                />
+
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => enviarCotizacionTaller(item)}
+                >
+                  <Text style={styles.primaryButtonText}>Enviar al admin</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+      </TouchableOpacity>
+    );
+  };
+
+  const renderSectionContent = () => {
+    if (selectedSection === "Vista general") {
+      return (
+        <>
+          <View style={styles.kpiGrid}>
+            {kpis.map((item) => (
+              <View key={item.label} style={[styles.kpiCard, isMobile && styles.kpiCardMobile]}>
+                <View style={[styles.kpiBar, { backgroundColor: item.color }]} />
+                <Text style={styles.kpiValue}>{item.value}</Text>
+                <Text style={styles.kpiLabel}>{item.label}</Text>
+              </View>
+            ))}
           </View>
 
-          <Text style={styles.sidebarWelcome}>Bienvenido</Text>
+          <View style={[styles.grid, isMobile && styles.gridMobile]}>
+            <View style={styles.panel}>
+              <Text style={styles.panelTitle}>Alertas</Text>
+              <View style={styles.simpleRow}><MaterialCommunityIcons name="bell-ring-outline" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{waitingAdminRequests.length} pendientes de respuesta al administrador</Text></View>
+              <View style={styles.simpleRow}><MaterialCommunityIcons name="clock-alert-outline" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{delayedRequests.length} tiempos atrasados</Text></View>
+              <View style={styles.simpleRow}><MaterialCommunityIcons name="backup-restore" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{returnedRequests.length} solicitudes devueltas</Text></View>
+            </View>
 
-          {menuItems.map((item) => (
-            <TouchableOpacity
-              key={item.label}
-              style={[styles.menuItem, item.active && styles.menuItemActive]}
-            >
-              <MaterialCommunityIcons
-                name={item.icon as any}
-                size={20}
-                color={item.active ? "#08121f" : "#c2cbe0"}
-              />
-              <Text style={[styles.menuText, item.active && styles.menuTextActive]}>
-                {item.label}
-              </Text>
+            <View style={styles.panel}>
+              <Text style={styles.panelTitle}>Tiempos atrasados</Text>
+              {delayedRequests.length > 0 ? delayedRequests.map((item) => (
+                <View key={String(item.id)} style={styles.simpleInfoCard}>
+                  <Text style={styles.simpleInfoTitle}>Orden #{item.id}</Text>
+                  <Text style={styles.simpleInfoText}>{item.cliente?.nombre || "Sin cliente"}</Text>
+                  <Text style={styles.simpleInfoText}>{getVehicleName(item)}</Text>
+                </View>
+              )) : <Text style={styles.emptyText}>No hay ordenes atrasadas.</Text>}
+            </View>
+          </View>
+        </>
+      );
+    }
+
+    if (selectedSection === "Solicitudes recibidas") {
+      return (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Solicitudes recibidas</Text>
+          <Text style={styles.panelSubtitle}>Aqui llegan las solicitudes enviadas por el administrador. Desde aqui puedes cotizar y devolver el diagnostico.</Text>
+          {requestsReceived.length > 0 ? requestsReceived.map((item) => renderRequestCard(item, { showQuote: true, showReturn: true, showInfo: true })) : <Text style={styles.emptyText}>No hay solicitudes nuevas en este momento.</Text>}
+        </View>
+      );
+    }
+
+    if (selectedSection === "Diagnostico") {
+      return (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Diagnostico</Text>
+          <Text style={styles.panelSubtitle}>Aqui se ven las solicitudes ya diagnosticadas y pendientes de revision del administrador.</Text>
+          {waitingAdminRequests.length > 0 ? waitingAdminRequests.map((item) => renderRequestCard(item, { showInfo: true })) : <Text style={styles.emptyText}>No hay diagnosticos enviados al administrador.</Text>}
+        </View>
+      );
+    }
+
+    if (selectedSection === "Intervencion") {
+      const interventionItems = [...approvedRequests, ...inProgressRequests];
+      return (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Intervencion</Text>
+          <Text style={styles.panelSubtitle}>Solo ingresan aqui las solicitudes aprobadas por el administrador.</Text>
+          {interventionItems.length > 0 ? interventionItems.map((item) => renderRequestCard(item, {
+            showStart: isApprovedStatus(item.estado),
+            showProgress: isInProcessStatus(item.estado),
+            showFinish: isInProcessStatus(item.estado),
+          })) : <Text style={styles.emptyText}>No hay ordenes en intervencion.</Text>}
+        </View>
+      );
+    }
+
+    if (selectedSection === "Materiales / Repuestos") {
+      const materialSource = [...approvedRequests, ...inProgressRequests];
+      return (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Materiales / Repuestos</Text>
+          <Text style={styles.panelSubtitle}>Control de insumos usados por cada orden.</Text>
+          {materialSource.length > 0 ? materialSource.map((item) => (
+            <View key={String(item.id)} style={styles.simpleInfoCard}>
+              <Text style={styles.simpleInfoTitle}>Orden #{item.id}</Text>
+              <Text style={styles.simpleInfoText}>{getRequestTitle(item.tipo_servicio)}</Text>
+              <Text style={styles.simpleInfoText}>Materiales solicitados: revisar segun diagnostico</Text>
+              <Text style={styles.simpleInfoText}>Materiales aprobados: pendientes por confirmar</Text>
+              <Text style={styles.simpleInfoText}>Materiales usados: por registrar</Text>
+            </View>
+          )) : <Text style={styles.emptyText}>No hay materiales o repuestos activos.</Text>}
+        </View>
+      );
+    }
+
+    if (selectedSection === "Entrega / Informe") {
+      return (
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Entrega / Informe</Text>
+          <Text style={styles.panelSubtitle}>El taller devuelve la informacion final al administrador.</Text>
+          {inProgressRequests.length > 0 ? inProgressRequests.map((item) => (
+            <View key={String(item.id)} style={styles.requestCard}>
+              <Text style={styles.requestTitle}>Orden #{item.id}</Text>
+              <Text style={styles.requestSubtitle}>{getVehicleName(item)}</Text>
+              <Text style={styles.metaText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
+              <Text style={styles.metaText}>Diagnostico final: listo para enviar</Text>
+              <Text style={styles.metaText}>Servicios realizados: {item.tipo_servicio || "Revision general"}</Text>
+              <Text style={styles.metaText}>Horas reales: pendientes por cargar</Text>
+              <Text style={styles.metaText}>Materiales utilizados: pendientes por confirmar</Text>
+              <View style={styles.actionRow}>
+                <TouchableOpacity style={styles.primaryButton} onPress={() => Alert.alert("Informe", "El informe quedo listo para el administrador.")}>
+                  <Text style={styles.primaryButtonText}>Enviar informe al administrador</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )) : <Text style={styles.emptyText}>No hay ordenes listas para informe.</Text>}
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.panel}>
+        <Text style={styles.panelTitle}>Historial</Text>
+        <Text style={styles.panelSubtitle}>Ordenes finalizadas y solicitudes devueltas.</Text>
+        {[...finishedRequests, ...returnedRequests].length > 0 ? [...finishedRequests, ...returnedRequests].map((item) => renderRequestCard(item)) : <Text style={styles.emptyText}>No hay historial disponible.</Text>}
+      </View>
+    );
+  };
+
+  return (
+    <View style={styles.screen}>
+      {showNotifications ? (
+        <View style={styles.overlayLayer} pointerEvents="box-none">
+          <Pressable style={styles.overlayBackdrop} onPress={() => { setShowNotifications(false); }} />
+        </View>
+      ) : null}
+
+      <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+        <View style={styles.topActionsRow}>
+          <View style={styles.topActionGroup}>
+            <TouchableOpacity style={styles.iconActionButton} onPress={() => { setMenuOpen((current) => !current); setShowNotifications(false); }}>
+              <MaterialCommunityIcons name="menu" size={28} color="#08121f" />
             </TouchableOpacity>
-          ))}
 
-          <TouchableOpacity style={styles.logoutButton} onPress={cerrarSesion}>
-            <MaterialCommunityIcons name="logout" size={20} color="#ffb4a8" />
-            <Text style={styles.logoutButtonText}>Cerrar sesion</Text>
+            {menuOpen ? (
+              <View style={[styles.dropdownMenu, isMobile && styles.dropdownMenuMobile]}>
+                <View style={styles.dropdownHeader}>
+                  <View style={styles.logoBox}><MaterialCommunityIcons name="car-cog" size={24} color="#ffffff" /></View>
+                  <View>
+                    <Text style={styles.sidebarEyebrow}>Taller</Text>
+                    <Text style={styles.sidebarTitle}>{tallerName}</Text>
+                  </View>
+                </View>
+
+                {sections.map((item) => {
+                  const active = selectedSection === item.label;
+                  return (
+                    <TouchableOpacity key={item.label} style={[styles.sideItem, active && styles.sideItemActive]} onPress={() => { setSelectedSection(item.label); setMenuOpen(false); }}>
+                      <View style={styles.sideItemRow}>
+                        <MaterialCommunityIcons name={item.icon as any} size={20} color={active ? "#08121f" : "#c2cbe0"} />
+                        <Text style={[styles.sideText, active && styles.sideTextActive]}>{item.label}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+
+                <TouchableOpacity style={styles.logoutButton} onPress={cerrarSesion}>
+                  <MaterialCommunityIcons name="logout" size={20} color="#ffb4a8" />
+                  <Text style={styles.logoutButtonText}>Cerrar sesion</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </View>
+
+          <TouchableOpacity style={[styles.iconActionButton, styles.logoutIconButton]} onPress={cerrarSesion}>
+            <MaterialCommunityIcons name="power" size={26} color="#ffffff" />
           </TouchableOpacity>
         </View>
 
         <View style={styles.main}>
           <View style={[styles.hero, isMobile && styles.heroMobile]}>
-            <View>
-              <Text style={styles.greeting}>Buenos dias</Text>
-              <Text style={styles.tallerName}>{tallerName}</Text>
-              <Text style={styles.heroSubtitle}>
-                Controla la operacion del taller, los vehiculos activos y el avance del dia.
-              </Text>
+            <View style={styles.heroTextGroup}>
+              <Text style={styles.pageTitle}>Modulo: Taller</Text>
+              <Text style={styles.pageSubtitle}>Gestiona la recepcion, diagnostico, intervencion e informe final de cada orden.</Text>
+              <View style={styles.currentSectionPill}>
+                <Text style={styles.currentSectionText}>{selectedSection}</Text>
+              </View>
             </View>
 
-            <TouchableOpacity
-              style={styles.bellButton}
-              activeOpacity={0.9}
-              onPress={() => setShowNotifications((current) => !current)}
-            >
+            <TouchableOpacity style={styles.bellButton} onPress={() => { setShowNotifications((current) => !current); setMenuOpen(false); }}>
               <MaterialCommunityIcons name="bell-outline" size={24} color="#2563eb" />
               <View style={styles.notificationBadge}>
                 <Text style={styles.notificationBadgeText}>{unreadNotifications}</Text>
@@ -373,731 +736,103 @@ export default function TallerDashboard() {
           {showNotifications ? (
             <View style={styles.notificationsDropdown}>
               <Text style={styles.notificationsTitle}>Notificaciones</Text>
-              {notificaciones.length > 0 ? (
-                notificaciones.map((item) => (
-                  <TouchableOpacity
-                    key={String(item.id)}
-                    style={styles.notificationItem}
-                    activeOpacity={0.9}
-                    onPress={() => abrirDesdeNotificacion(item)}
-                  >
-                    <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
-                    <Text style={styles.notificationItemText}>{item.mensaje || ""}</Text>
-                  </TouchableOpacity>
-                ))
-              ) : (
-                <Text style={styles.emptyColumnText}>No tienes notificaciones nuevas.</Text>
-              )}
+              {notificaciones.length > 0 ? notificaciones.map((item) => (
+                <TouchableOpacity key={String(item.id)} style={styles.notificationItem} onPress={() => abrirDesdeNotificacion(item)}>
+                  <Text style={styles.notificationItemTitle}>{item.titulo || "Notificacion"}</Text>
+                </TouchableOpacity>
+              )) : <Text style={styles.emptyText}>No tienes notificaciones nuevas.</Text>}
             </View>
           ) : null}
 
-          <View style={styles.quickStats}>
-            <StatCard label="Vehiculos hoy" value={String(resumen.vehiculosHoy)} color="#1e88e5" isMobile={isMobile} />
-            <StatCard label="En diagnostico" value={String(resumen.diagnostico)} color="#ff8a3d" isMobile={isMobile} />
-            <StatCard label="En reparacion" value={String(resumen.reparacion)} color="#23b26d" isMobile={isMobile} />
-            <StatCard label="Esperando repuestos" value={String(resumen.repuestos)} color="#f4b400" isMobile={isMobile} />
-            <StatCard label="Listos para entrega" value={String(resumen.listos)} color="#7b61ff" isMobile={isMobile} />
-          </View>
-
-          <View style={styles.panel}>
-            <View style={[styles.sectionHeader, isMobile && styles.sectionHeaderMobile]}>
-              <Text style={styles.sectionTitle}>Nuevas solicitudes</Text>
-              <Text style={styles.sectionCaption}>{pendingRequests.length} pendientes</Text>
-            </View>
-
-            {pendingRequests.length === 0 ? (
-              <Text style={styles.emptyColumnText}>No hay solicitudes nuevas en este momento.</Text>
-            ) : (
-              pendingRequests.map((item, index) => (
-                <View
-                  key={String(item.id ?? index)}
-                  style={[
-                    styles.requestCard,
-                    highlightedOrderId === String(item.id) && styles.highlightedRequestCard,
-                  ]}
-                >
-                  <Text style={styles.requestOrder}>Orden #{item.id}</Text>
-                  <Text style={styles.requestText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
-                  <Text style={styles.requestText}>
-                    Vehiculo: {item.vehiculo?.marca} {item.vehiculo?.modelo}
-                  </Text>
-                  <Text style={styles.requestText}>Problema: {item.problema || "Sin descripcion"}</Text>
-
-                  <View style={styles.requestActions}>
-                    <TouchableOpacity style={styles.secondaryActionButton}>
-                      <Text style={styles.secondaryActionText}>Ver detalle</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.acceptButton}
-                      onPress={() => actualizarEstadoSolicitud(String(item.id), "diagnostico")}
-                    >
-                      <Text style={styles.acceptButtonText}>Tomar orden</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={styles.rejectButton}
-                      onPress={() => actualizarEstadoSolicitud(String(item.id), "pendiente")}
-                    >
-                      <Text style={styles.rejectButtonText}>Devolver</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ))
-            )}
-          </View>
-
-          <View style={[styles.sectionHeader, isMobile && styles.sectionHeaderMobile]}>
-            <Text style={styles.sectionTitle}>Tablero Kanban</Text>
-            <Text style={styles.sectionCaption}>Flujo de trabajo por estado</Text>
-          </View>
-
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.board}>
-            {columns.map((column) => {
-              const items = board.filter((item) => item.estado === column.key);
-
-              return (
-                <View key={column.key} style={[styles.column, { width: boardColumnWidth }]}>
-                  <View style={styles.columnHeader}>
-                    <View style={[styles.columnDot, { backgroundColor: column.accent }]} />
-                    <Text style={styles.columnTitle}>{column.title}</Text>
-                    <Text style={styles.columnCount}>{items.length}</Text>
-                  </View>
-
-                  {items.length === 0 ? (
-                    <View style={styles.emptyColumn}>
-                      <Text style={styles.emptyColumnText}>Sin vehiculos</Text>
-                    </View>
-                  ) : (
-                    items.map((item) => (
-                      <KanbanVehicleCard
-                        key={item.id}
-                        item={item}
-                        accent={column.accent}
-                        highlighted={highlightedOrderId === String(item.id)}
-                      />
-                    ))
-                  )}
-                </View>
-              );
-            })}
-          </ScrollView>
-
-          <View style={[styles.bottomGrid, isMobile && styles.bottomGridMobile]}>
-            <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Mecanicos activos</Text>
-              {mechanics.map((mechanic) => (
-                <View key={mechanic.name} style={styles.mechanicRow}>
-                  <View style={[styles.avatar, { backgroundColor: mechanic.color }]}>
-                    <Text style={styles.avatarText}>{mechanic.name.charAt(0)}</Text>
-                  </View>
-                  <View style={styles.mechanicInfo}>
-                    <Text style={styles.mechanicName}>{mechanic.name}</Text>
-                    <Text style={styles.mechanicVehicles}>{mechanic.vehicles} vehiculos</Text>
-                  </View>
-                  <MaterialCommunityIcons name="wrench" size={20} color={mechanic.color} />
-                </View>
-              ))}
-            </View>
-
-            <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Repuestos pendientes</Text>
-              <Text style={styles.pendingCounter}>4 pendientes</Text>
-              {spareParts.map((part) => (
-                <View key={part} style={styles.partRow}>
-                  <MaterialCommunityIcons name="package-variant" size={18} color="#f4b400" />
-                  <Text style={styles.partText}>{part}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-
-          <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Indicadores del taller</Text>
-            <View style={styles.indicatorGrid}>
-              {indicadores.map((item) => (
-                <View key={item.label} style={styles.indicatorCard}>
-                  <View style={[styles.indicatorIcon, { backgroundColor: `${item.color}18` }]}>
-                    <MaterialCommunityIcons name={item.icon as any} size={22} color={item.color} />
-                  </View>
-                  <Text style={styles.indicatorValue}>{item.value}</Text>
-                  <Text style={styles.indicatorLabel}>{item.label}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
+          {renderSectionContent()}
         </View>
-      </View>
-    </ScrollView>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  color,
-  isMobile,
-}: {
-  label: string;
-  value: string;
-  color: string;
-  isMobile: boolean;
-}) {
-  return (
-    <View style={[styles.statCard, isMobile && styles.statCardMobile]}>
-      <View style={[styles.statBar, { backgroundColor: color }]} />
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
-    </View>
-  );
-}
-
-function KanbanVehicleCard({
-  item,
-  accent,
-  highlighted = false,
-}: {
-  item: KanbanCard;
-  accent: string;
-  highlighted?: boolean;
-}) {
-  return (
-    <View style={[styles.kanbanCard, highlighted && styles.highlightedRequestCard]}>
-      <View style={[styles.kanbanAccent, { backgroundColor: accent }]} />
-      <Text style={styles.vehicleName}>{item.vehiculo}</Text>
-      <Text style={styles.plate}>Placa: {item.placa}</Text>
-
-      {item.cliente ? <Text style={styles.cardText}>Cliente: {item.cliente}</Text> : null}
-      {item.problema ? <Text style={styles.cardText}>Problema: {item.problema}</Text> : null}
-      {item.trabajo ? <Text style={styles.cardText}>Trabajo: {item.trabajo}</Text> : null}
-      {item.mecanico ? <Text style={styles.cardText}>Mecanico: {item.mecanico}</Text> : null}
-
-      {item.repuestos?.length ? (
-        <View style={styles.chips}>
-          {item.repuestos.map((part) => (
-            <View key={part} style={styles.chip}>
-              <Text style={styles.chipText}>{part}</Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
-
-      {item.proveedor ? <Text style={styles.cardSubtle}>Proveedor: {item.proveedor}</Text> : null}
-      {item.entrega ? <Text style={styles.cardSubtle}>Entrega: {item.entrega}</Text> : null}
-      {item.costo ? <Text style={styles.cardSubtle}>Costo total: {item.costo}</Text> : null}
-
-      <TouchableOpacity style={styles.actionButton}>
-        <Text style={styles.actionText}>{item.accion}</Text>
-      </TouchableOpacity>
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: "#eef3f9",
-  },
-  screenContent: {
-    padding: 20,
-  },
-  layout: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 18,
-  },
-  layoutMobile: {
-    flexDirection: "column",
-  },
-  sidebar: {
-    width: 220,
-    backgroundColor: "#08121f",
-    borderRadius: 28,
-    padding: 20,
-  },
-  sidebarMobile: {
-    width: "100%",
-  },
-  sidebarHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginBottom: 22,
-  },
-  logoBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: "#ff5b2e",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sidebarEyebrow: {
-    color: "#8fa1c2",
-    fontSize: 12,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  sidebarTitle: {
-    color: "#ffffff",
-    fontSize: 20,
-    fontWeight: "700",
-  },
-  sidebarWelcome: {
-    color: "#c2cbe0",
-    marginBottom: 12,
-  },
-  menuItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    marginBottom: 8,
-  },
-  menuItemActive: {
-    backgroundColor: "#dfe9f7",
-  },
-  menuText: {
-    color: "#c2cbe0",
-    fontSize: 15,
-    fontWeight: "500",
-  },
-  menuTextActive: {
-    color: "#08121f",
-    fontWeight: "700",
-  },
-  logoutButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    marginTop: 18,
-    backgroundColor: "rgba(255,91,46,0.12)",
-  },
-  logoutButtonText: {
-    color: "#ffb4a8",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  main: {
-    flex: 1,
-    gap: 18,
-  },
-  hero: {
-    backgroundColor: "#ffffff",
-    borderRadius: 28,
-    padding: 24,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    borderWidth: 1,
-    borderColor: "#dbe4f0",
-  },
-  heroMobile: {
-    flexDirection: "column",
-    gap: 16,
-  },
-  greeting: {
-    color: "#7a8699",
-    fontSize: 16,
-    marginBottom: 6,
-  },
-  tallerName: {
-    color: "#08121f",
-    fontSize: 32,
-    fontWeight: "800",
-  },
-  heroSubtitle: {
-    color: "#5f6b7c",
-    maxWidth: 560,
-    marginTop: 8,
-    lineHeight: 22,
-  },
-  heroBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#fff2e8",
-    borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  heroBadgeText: {
-    color: "#9b4b14",
-    fontWeight: "700",
-  },
-  bellButton: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: "#ffffff",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#e5ebf5",
-  },
-  notificationBadge: {
-    position: "absolute",
-    top: 6,
-    right: 5,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: "#ff5b2e",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  notificationBadgeText: {
-    color: "#fff",
-    fontSize: 10,
-    fontWeight: "800",
-  },
-  notificationsDropdown: {
-    backgroundColor: "#ffffff",
-    borderRadius: 22,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: "#dbe4f0",
-  },
-  notificationsTitle: {
-    color: "#08121f",
-    fontSize: 18,
-    fontWeight: "800",
-    marginBottom: 10,
-  },
-  notificationItem: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#e6edf6",
-    backgroundColor: "#f8fbff",
-    padding: 14,
-    marginTop: 10,
-  },
-  notificationItemTitle: {
-    color: "#08121f",
-    fontWeight: "800",
-    marginBottom: 4,
-  },
-  notificationItemText: {
-    color: "#5f6b7c",
-    lineHeight: 20,
-  },
-  quickStats: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 14,
-  },
-  statCard: {
-    backgroundColor: "#ffffff",
-    borderRadius: 22,
-    padding: 18,
-    minWidth: 160,
-    flexGrow: 1,
-    borderWidth: 1,
-    borderColor: "#dbe4f0",
-  },
-  statCardMobile: {
-    width: "47%",
-    minWidth: 0,
-  },
-  statBar: {
-    width: 42,
-    height: 6,
-    borderRadius: 999,
-    marginBottom: 18,
-  },
-  statValue: {
-    fontSize: 28,
-    fontWeight: "800",
-    color: "#08121f",
-  },
-  statLabel: {
-    color: "#6b778a",
-    marginTop: 6,
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  sectionHeaderMobile: {
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: 6,
-  },
-  sectionTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#08121f",
-  },
-  sectionCaption: {
-    color: "#7a8699",
-  },
-  board: {
-    gap: 14,
-    paddingBottom: 4,
-  },
-  column: {
-    width: 280,
-    backgroundColor: "#f8fbff",
-    borderRadius: 24,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#dbe4f0",
-  },
-  columnHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 14,
-  },
-  columnDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 999,
-    marginRight: 8,
-  },
-  columnTitle: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#08121f",
-  },
-  columnCount: {
-    color: "#7a8699",
-    fontWeight: "700",
-  },
-  emptyColumn: {
-    paddingVertical: 24,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 18,
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#e6edf6",
-  },
-  emptyColumnText: {
-    color: "#8a94a6",
-  },
-  kanbanCard: {
-    backgroundColor: "#ffffff",
-    borderRadius: 20,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#e6edf6",
-  },
-  kanbanAccent: {
-    width: 52,
-    height: 6,
-    borderRadius: 999,
-    marginBottom: 14,
-  },
-  vehicleName: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#08121f",
-  },
-  plate: {
-    color: "#5f6b7c",
-    marginTop: 4,
-    marginBottom: 8,
-  },
-  cardText: {
-    color: "#2f3a49",
-    marginTop: 4,
-  },
-  cardSubtle: {
-    color: "#6b778a",
-    marginTop: 8,
-  },
-  chips: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginTop: 10,
-  },
-  chip: {
-    backgroundColor: "#eef3f9",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  chipText: {
-    color: "#425066",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  actionButton: {
-    marginTop: 14,
-    backgroundColor: "#08121f",
-    borderRadius: 14,
-    alignItems: "center",
-    paddingVertical: 12,
-  },
-  actionText: {
-    color: "#ffffff",
-    fontWeight: "700",
-  },
-  bottomGrid: {
-    flexDirection: "row",
-    gap: 18,
-  },
-  bottomGridMobile: {
-    flexDirection: "column",
-  },
-  panel: {
-    backgroundColor: "#ffffff",
-    borderRadius: 24,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: "#dbe4f0",
-    flex: 1,
-  },
-  panelTitle: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#08121f",
-    marginBottom: 14,
-  },
-  mechanicRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 10,
-  },
-  avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarText: {
-    color: "#ffffff",
-    fontSize: 18,
-    fontWeight: "800",
-  },
-  mechanicInfo: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  mechanicName: {
-    color: "#08121f",
-    fontWeight: "700",
-  },
-  mechanicVehicles: {
-    color: "#6b778a",
-    marginTop: 2,
-  },
-  pendingCounter: {
-    color: "#f4b400",
-    fontWeight: "800",
-    marginBottom: 12,
-  },
-  partRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 8,
-  },
-  partText: {
-    color: "#2f3a49",
-  },
-  indicatorGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 14,
-  },
-  indicatorCard: {
-    minWidth: 180,
-    flexGrow: 1,
-    backgroundColor: "#f8fbff",
-    borderRadius: 20,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: "#e6edf6",
-  },
-  indicatorIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
-  },
-  indicatorValue: {
-    fontSize: 24,
-    fontWeight: "800",
-    color: "#08121f",
-  },
-  indicatorLabel: {
-    color: "#6b778a",
-    marginTop: 6,
-  },
-  requestCard: {
-    marginTop: 14,
-    backgroundColor: "#f8fbff",
-    borderRadius: 20,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "#e6edf6",
-  },
-  highlightedRequestCard: {
-    borderColor: "#2563eb",
-    borderWidth: 2,
-    shadowColor: "#2563eb",
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 3,
-  },
-  requestOrder: {
-    color: "#08121f",
-    fontWeight: "800",
-    fontSize: 16,
-    marginBottom: 8,
-  },
-  requestText: {
-    color: "#425066",
-    marginTop: 4,
-  },
-  requestActions: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 14,
-    flexWrap: "wrap",
-  },
-  secondaryActionButton: {
-    backgroundColor: "#eef3f9",
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  secondaryActionText: {
-    color: "#08121f",
-    fontWeight: "700",
-  },
-  acceptButton: {
-    backgroundColor: "#23b26d",
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  acceptButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
-  },
-  rejectButton: {
-    backgroundColor: "#fee2e2",
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  rejectButtonText: {
-    color: "#b91c1c",
-    fontWeight: "700",
-  },
+  screen: { flex: 1, backgroundColor: "#eef3f9" },
+  content: { padding: 20 },
+  overlayLayer: { ...StyleSheet.absoluteFillObject, zIndex: 20 },
+  overlayBackdrop: { ...StyleSheet.absoluteFillObject },
+  topActionsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 18, zIndex: 30 },
+  topActionGroup: { position: "relative" },
+  iconActionButton: { width: 56, height: 56, borderRadius: 18, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#dbe4f0", alignItems: "center", justifyContent: "center", shadowColor: "#08121f", shadowOpacity: 0.08, shadowRadius: 8, elevation: 2 },
+  logoutIconButton: { backgroundColor: "#ef4444", borderColor: "#ef4444" },
+  dropdownMenu: { position: "absolute", top: 68, left: 0, width: 320, backgroundColor: "#08121f", borderRadius: 28, padding: 20, shadowColor: "#08121f", shadowOpacity: 0.24, shadowRadius: 20, elevation: 8 },
+  dropdownMenuMobile: { width: 280 },
+  dropdownHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 18 },
+  logoBox: { width: 44, height: 44, borderRadius: 14, backgroundColor: "#ff5b2e", alignItems: "center", justifyContent: "center" },
+  sidebarEyebrow: { color: "#8fa1c2", fontSize: 12, textTransform: "uppercase", letterSpacing: 1 },
+  sidebarTitle: { color: "#ffffff", fontSize: 20, fontWeight: "700" },
+  sideItem: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 12, borderRadius: 16, marginBottom: 8 },
+  sideItemRow: { flexDirection: "row", alignItems: "center" },
+  sideItemActive: { backgroundColor: "#dfe9f7" },
+  sideText: { color: "#c2cbe0", marginLeft: 12, fontWeight: "600" },
+  sideTextActive: { color: "#08121f", fontWeight: "800" },
+  logoutButton: { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 12, marginTop: 18, backgroundColor: "rgba(255,91,46,0.12)" },
+  logoutButtonText: { color: "#ffb4a8", fontSize: 15, fontWeight: "700" },
+  main: { gap: 18 },
+  hero: { backgroundColor: "#ffffff", borderRadius: 28, padding: 24, borderWidth: 1, borderColor: "#dbe4f0", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  heroMobile: { flexDirection: "column", alignItems: "flex-start", gap: 16 },
+  heroTextGroup: { flex: 1 },
+  pageTitle: { color: "#08121f", fontSize: 32, fontWeight: "800" },
+  pageSubtitle: { color: "#5f6b7c", marginTop: 8, lineHeight: 22, maxWidth: 620 },
+  currentSectionPill: { alignSelf: "flex-start", marginTop: 14, backgroundColor: "#eef4ff", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: "#d7e4fb" },
+  currentSectionText: { color: "#2563eb", fontWeight: "800" },
+  bellButton: { width: 52, height: 52, borderRadius: 26, backgroundColor: "#ffffff", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#e5ebf5" },
+  notificationBadge: { position: "absolute", top: 6, right: 5, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: "#ff5b2e", alignItems: "center", justifyContent: "center", paddingHorizontal: 4 },
+  notificationBadgeText: { color: "#ffffff", fontSize: 10, fontWeight: "800" },
+  notificationsDropdown: { backgroundColor: "#ffffff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: "#dbe4f0", zIndex: 25 },
+  notificationsTitle: { color: "#08121f", fontSize: 18, fontWeight: "800", marginBottom: 10 },
+  notificationItem: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#e6edf6" },
+  notificationItemTitle: { color: "#08121f", fontWeight: "800" },
+  panel: { backgroundColor: "#ffffff", borderRadius: 24, padding: 22, borderWidth: 1, borderColor: "#dbe4f0", flex: 1 },
+  panelTitle: { color: "#08121f", fontSize: 22, fontWeight: "800" },
+  panelSubtitle: { color: "#64748b", marginTop: 8, lineHeight: 22 },
+  kpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
+  kpiCard: { minWidth: 160, width: "31%", flexGrow: 1, backgroundColor: "#ffffff", borderRadius: 22, padding: 18, borderWidth: 1, borderColor: "#dbe4f0" },
+  kpiCardMobile: { width: "47%", minWidth: 0 },
+  kpiBar: { width: 42, height: 6, borderRadius: 999, marginBottom: 18 },
+  kpiValue: { color: "#08121f", fontSize: 28, fontWeight: "800" },
+  kpiLabel: { color: "#6b778a", marginTop: 6, fontWeight: "700" },
+  grid: { flexDirection: "row", gap: 16 },
+  gridMobile: { flexDirection: "column" },
+  simpleRow: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#f8fbff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#e6edf6", marginTop: 12 },
+  simpleRowText: { color: "#334155", fontWeight: "700", flex: 1 },
+  simpleInfoCard: { backgroundColor: "#f8fbff", borderRadius: 18, padding: 16, marginTop: 12, borderWidth: 1, borderColor: "#e6edf6" },
+  simpleInfoTitle: { color: "#08121f", fontWeight: "800", marginBottom: 6 },
+  simpleInfoText: { color: "#475569", marginTop: 4 },
+  requestCard: { backgroundColor: "#f8fbff", borderRadius: 20, padding: 16, marginTop: 14, borderWidth: 1, borderColor: "#e6edf6" },
+  highlightedCard: { borderColor: "#2563eb", borderWidth: 2, shadowColor: "#2563eb", shadowOpacity: 0.14, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
+  requestHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 },
+  requestHeaderMain: { flex: 1 },
+  requestTitle: { color: "#08121f", fontWeight: "800", fontSize: 18 },
+  requestSubtitle: { color: "#475569", marginTop: 4, fontWeight: "700" },
+  statePill: { backgroundColor: "#eef4ff", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#d7e4fb" },
+  statePillText: { color: "#2563eb", fontWeight: "800" },
+  metaText: { color: "#475569", marginTop: 6, fontWeight: "600" },
+  priorityPill: { alignSelf: "flex-start", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, marginTop: 12 },
+  priorityText: { fontWeight: "800", textTransform: "capitalize" },
+  expandHint: { color: "#64748b", marginTop: 10, fontSize: 12, fontWeight: "700" },
+  expandedBlock: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: "#dbe4f0" },
+  expandedText: { color: "#334155", marginTop: 4, lineHeight: 20 },
+  infoBanner: { marginTop: 12, backgroundColor: "#eff6ff", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: "#bfdbfe", flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  infoBannerText: { color: "#1d4ed8", flex: 1, lineHeight: 20, fontWeight: "600" },
+  actionRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
+  quoteFormCard: { marginTop: 14, backgroundColor: "#ffffff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#dbe4f0", gap: 10 },
+  quoteFormTitle: { color: "#08121f", fontSize: 16, fontWeight: "800" },
+  quoteFormLabel: { color: "#334155", fontWeight: "700", marginTop: 2 },
+  quoteInput: { backgroundColor: "#f8fbff", borderRadius: 14, borderWidth: 1, borderColor: "#dbe4f0", paddingHorizontal: 14, paddingVertical: 12, color: "#08121f" },
+  quoteInputMultiline: { minHeight: 92, textAlignVertical: "top" },
+  primaryButton: { backgroundColor: "#2563eb", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
+  primaryButtonText: { color: "#ffffff", fontWeight: "800" },
+  secondaryButton: { backgroundColor: "#eef2ff", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
+  secondaryButtonText: { color: "#334155", fontWeight: "800" },
+  successButton: { backgroundColor: "#16a34a", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
+  successButtonText: { color: "#ffffff", fontWeight: "800" },
+  dangerButton: { backgroundColor: "#fee2e2", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#fecaca" },
+  dangerButtonText: { color: "#b91c1c", fontWeight: "800" },
+  emptyText: { color: "#94a3b8", marginTop: 14, fontStyle: "italic" },
 });
