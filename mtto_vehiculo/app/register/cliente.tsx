@@ -3,6 +3,9 @@ import { Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from "reac
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
+import storage from "../../constants/storage";
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function RegisterCliente() {
   const [nombre, setNombre] = useState("");
@@ -15,17 +18,29 @@ export default function RegisterCliente() {
       Alert.alert("Error", "Todos los campos son obligatorios");
       return;
     }
+    if (!EMAIL_REGEX.test(email.trim().toLowerCase())) {
+      Alert.alert("Error", "Debes ingresar un correo valido");
+      return;
+    }
+    if (!/^\d+$/.test(telefono.trim())) {
+      Alert.alert("Error", "El celular debe contener solo numeros");
+      return;
+    }
 
     try {
+      const normalizedEmail = email.trim().toLowerCase();
+      const normalizedNombre = nombre.trim();
+      const normalizedTelefono = telefono.trim();
+
       const response = await fetch(`${API_BASE_URL}/register/cliente`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          nombre,
-          email,
-          telefono,
+          nombre: normalizedNombre,
+          email: normalizedEmail,
+          telefono: normalizedTelefono,
           password,
           rol: "cliente",
         }),
@@ -33,12 +48,36 @@ export default function RegisterCliente() {
 
       const data = await response.json();
 
-      if (response.ok) {
-        Alert.alert("Exito", "Cliente registrado");
-        router.replace("/(tabs)");
-      } else {
+      if (!response.ok) {
         Alert.alert("Error", data.detail || "No se pudo registrar");
+        return;
       }
+
+      const loginResponse = await fetch(`${API_BASE_URL}/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password,
+        }),
+      });
+
+      const loginData = await loginResponse.json().catch(() => null);
+
+      if (!loginResponse.ok || !loginData?.token) {
+        Alert.alert("Exito", "Cliente registrado, pero no se pudo iniciar sesion automaticamente");
+        router.replace("/");
+        return;
+      }
+
+      await storage.setItem("token", loginData.token);
+      await storage.setItem("user_name", loginData.nombre || normalizedNombre);
+      await storage.setItem("user_role", loginData.rol || "cliente");
+
+      Alert.alert("Exito", "Cliente registrado correctamente");
+      router.replace("/(tabs)");
     } catch (error) {
       Alert.alert("Error", "No se pudo conectar al servidor");
     }
@@ -54,8 +93,21 @@ export default function RegisterCliente() {
       <Text style={styles.title}>Registro Cliente</Text>
 
       <TextInput placeholder="Nombre" style={styles.input} value={nombre} onChangeText={setNombre} />
-      <TextInput placeholder="Correo" style={styles.input} value={email} onChangeText={setEmail} />
-      <TextInput placeholder="Telefono" style={styles.input} value={telefono} onChangeText={setTelefono} />
+      <TextInput
+        placeholder="Correo"
+        style={styles.input}
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <TextInput
+        placeholder="Celular"
+        style={styles.input}
+        value={telefono}
+        onChangeText={(value) => setTelefono(value.replace(/[^0-9]/g, ""))}
+        keyboardType="phone-pad"
+      />
       <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} value={password} onChangeText={setPassword} />
 
       <TouchableOpacity style={styles.button} onPress={registrar}>

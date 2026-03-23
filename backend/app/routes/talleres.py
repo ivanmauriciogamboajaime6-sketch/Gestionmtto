@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.usuario import Usuario
 from app.schemas.usuario import UsuarioCreate
 from app.auth.security import hash_password
+from app.services.notification_service import notification_service
 
 router = APIRouter(prefix="/talleres", tags=["Talleres"])
 
@@ -27,6 +28,8 @@ def register_taller(data: UsuarioCreate, db: Session = Depends(get_db)):
 
     db.add(usuario)
     db.commit()
+    db.refresh(usuario)
+    notification_service.notify_user_registered(usuario)
 
     return {"mensaje": "taller creado"}
 

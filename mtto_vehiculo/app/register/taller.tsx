@@ -4,6 +4,8 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function RegisterTaller() {
   const [nombre, setNombre] = useState("");
   const [email, setEmail] = useState("");
@@ -15,6 +17,14 @@ export default function RegisterTaller() {
       Alert.alert("Error", "Todos los campos son obligatorios");
       return;
     }
+    if (!EMAIL_REGEX.test(email.trim().toLowerCase())) {
+      Alert.alert("Error", "Debes ingresar un correo valido");
+      return;
+    }
+    if (!/^\d+$/.test(telefono.trim())) {
+      Alert.alert("Error", "El celular debe contener solo numeros");
+      return;
+    }
 
     try {
       const response = await fetch(`${API_BASE_URL}/talleres/register`, {
@@ -23,9 +33,9 @@ export default function RegisterTaller() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          nombre,
-          email,
-          telefono,
+          nombre: nombre.trim(),
+          email: email.trim().toLowerCase(),
+          telefono: telefono.trim(),
           password,
           rol: "taller",
         }),
@@ -54,9 +64,22 @@ export default function RegisterTaller() {
 
       <Text style={styles.title}>Registro Taller</Text>
 
-      <TextInput placeholder="Nombre del taller" style={styles.input} onChangeText={setNombre} />
-      <TextInput placeholder="Correo" style={styles.input} onChangeText={setEmail} autoCapitalize="none" />
-      <TextInput placeholder="Telefono" style={styles.input} onChangeText={setTelefono} />
+      <TextInput placeholder="Nombre del taller" style={styles.input} value={nombre} onChangeText={setNombre} />
+      <TextInput
+        placeholder="Correo"
+        style={styles.input}
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <TextInput
+        placeholder="Celular"
+        style={styles.input}
+        value={telefono}
+        onChangeText={(value) => setTelefono(value.replace(/[^0-9]/g, ""))}
+        keyboardType="phone-pad"
+      />
       <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} onChangeText={setPassword} />
 
       <TouchableOpacity style={styles.button} onPress={registrar}>

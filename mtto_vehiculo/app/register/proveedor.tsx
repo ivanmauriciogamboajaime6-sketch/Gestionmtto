@@ -5,15 +5,27 @@ import { router } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
 import storage from "../../constants/storage";
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PROVIDER_SPECIALTIES = ["llantas", "bateria", "cambio de aceite", "general"] as const;
+
 export default function RegisterProveedor() {
   const [nombre, setNombre] = useState("");
   const [email, setEmail] = useState("");
   const [telefono, setTelefono] = useState("");
   const [password, setPassword] = useState("");
+  const [especialidades, setEspecialidades] = useState<(typeof PROVIDER_SPECIALTIES)[number][]>([]);
 
   async function registrar() {
-    if (!nombre || !email || !telefono || !password) {
+    if (!nombre || !email || !telefono || !password || especialidades.length === 0) {
       Alert.alert("Error", "Todos los campos son obligatorios");
+      return;
+    }
+    if (!EMAIL_REGEX.test(email.trim().toLowerCase())) {
+      Alert.alert("Error", "Debes ingresar un correo valido");
+      return;
+    }
+    if (!/^\d+$/.test(telefono.trim())) {
+      Alert.alert("Error", "El celular debe contener solo numeros");
       return;
     }
 
@@ -24,11 +36,12 @@ export default function RegisterProveedor() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          nombre,
-          email,
-          telefono,
+          nombre: nombre.trim(),
+          email: email.trim().toLowerCase(),
+          telefono: telefono.trim(),
           password,
           rol: "proveedor",
+          especialidad: especialidades,
         }),
       });
 
@@ -69,6 +82,14 @@ export default function RegisterProveedor() {
     }
   }
 
+  function toggleEspecialidad(item: (typeof PROVIDER_SPECIALTIES)[number]) {
+    setEspecialidades((current) =>
+      current.includes(item)
+        ? current.filter((value) => value !== item)
+        : [...current, item]
+    );
+  }
+
   return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.backButton} onPress={() => router.replace("/select-role")}>
@@ -78,9 +99,47 @@ export default function RegisterProveedor() {
 
       <Text style={styles.title}>Registro proveedor</Text>
 
-      <TextInput placeholder="Nombre del proveedor" style={styles.input} onChangeText={setNombre} />
-      <TextInput placeholder="Correo" style={styles.input} onChangeText={setEmail} autoCapitalize="none" />
-      <TextInput placeholder="Telefono" style={styles.input} onChangeText={setTelefono} />
+      <TextInput placeholder="Nombre del proveedor" style={styles.input} value={nombre} onChangeText={setNombre} />
+      <TextInput
+        placeholder="Correo"
+        style={styles.input}
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <TextInput
+        placeholder="Celular"
+        style={styles.input}
+        value={telefono}
+        onChangeText={(value) => setTelefono(value.replace(/[^0-9]/g, ""))}
+        keyboardType="phone-pad"
+      />
+      <View style={styles.specialtySection}>
+        <Text style={styles.specialtyLabel}>Tipo de proveedor</Text>
+        <View style={styles.specialtyGrid}>
+          {PROVIDER_SPECIALTIES.map((item) => {
+            const selected = especialidades.includes(item);
+            return (
+              <TouchableOpacity
+                key={item}
+                style={[styles.specialtyOption, selected && styles.specialtyOptionSelected]}
+                onPress={() => toggleEspecialidad(item)}
+              >
+                <Text style={[styles.specialtyOptionText, selected && styles.specialtyOptionTextSelected]}>
+                  {item === "bateria"
+                    ? "Bateria"
+                    : item === "llantas"
+                      ? "Llantas"
+                      : item === "cambio de aceite"
+                        ? "Cambio de aceite"
+                        : "General"}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
       <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} onChangeText={setPassword} />
 
       <TouchableOpacity style={styles.button} onPress={registrar}>
@@ -101,6 +160,39 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 15,
     borderRadius: 8,
+  },
+  specialtySection: {
+    marginBottom: 15,
+  },
+  specialtyLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#334155",
+    marginBottom: 10,
+  },
+  specialtyGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  specialtyOption: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: "#fff",
+  },
+  specialtyOptionSelected: {
+    borderColor: "#2563eb",
+    backgroundColor: "#dbeafe",
+  },
+  specialtyOptionText: {
+    color: "#475569",
+    fontWeight: "600",
+  },
+  specialtyOptionTextSelected: {
+    color: "#1d4ed8",
   },
   button: {
     backgroundColor: "#2563eb",

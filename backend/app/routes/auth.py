@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth.jwt_handler import create_token
@@ -6,6 +6,7 @@ from app.auth.security import hash_password, verify_password
 from app.database import get_db
 from app.models.usuario import Usuario
 from app.schemas.usuario import UsuarioCreate, UsuarioLogin
+from app.services.notification_service import notification_service
 
 router = APIRouter()
 
@@ -15,7 +16,7 @@ def register_cliente(data: UsuarioCreate, db: Session = Depends(get_db)):
     usuario_existente = db.query(Usuario).filter(Usuario.email == data.email).first()
 
     if usuario_existente:
-        return {"error": "el usuario ya existe"}
+        raise HTTPException(status_code=400, detail="el usuario ya existe")
 
     nuevo_usuario = Usuario(
         nombre=data.nombre,
@@ -28,6 +29,8 @@ def register_cliente(data: UsuarioCreate, db: Session = Depends(get_db)):
 
     db.add(nuevo_usuario)
     db.commit()
+    db.refresh(nuevo_usuario)
+    notification_service.notify_user_registered(nuevo_usuario)
 
     return {"mensaje": "cliente creado correctamente"}
 
@@ -37,13 +40,13 @@ def login(data: UsuarioLogin, db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
 
     if not usuario:
-        return {"error": "usuario no encontrado"}
+        raise HTTPException(status_code=404, detail="usuario no encontrado")
 
     if not verify_password(data.password, usuario.password):
-        return {"error": "contrasena incorrecta"}
+        raise HTTPException(status_code=401, detail="contrasena incorrecta")
 
     if (usuario.estado or "activo") != "activo":
-        return {"error": "usuario bloqueado"}
+        raise HTTPException(status_code=403, detail="usuario bloqueado")
 
     token = create_token(
         {

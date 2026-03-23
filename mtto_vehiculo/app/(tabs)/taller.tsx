@@ -34,6 +34,7 @@ type Solicitud = {
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  observacion?: string | null;
   fecha?: string | null;
   taller_diagnostico?: {
     diagnostico?: string | null;
@@ -116,7 +117,7 @@ export default function TallerDashboard() {
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [openQuoteFormId, setOpenQuoteFormId] = useState<string | null>(null);
   const [quoteForms, setQuoteForms] = useState<
-    Record<string, { diagnostico: string; servicios: string; horas: string; materiales: string }>
+    Record<string, { diagnostico: string; servicios: string; horas: string; materiales: string; comentario: string }>
   >({});
 
   useEffect(() => {
@@ -181,7 +182,12 @@ export default function TallerDashboard() {
     router.replace("/");
   };
 
-  const actualizarEstadoSolicitud = async (solicitudId: string, estado: string, successMessage: string) => {
+  const actualizarEstadoSolicitud = async (
+    solicitudId: string,
+    estado: string,
+    successMessage: string,
+    comentario?: string
+  ) => {
     try {
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
@@ -190,7 +196,7 @@ export default function TallerDashboard() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ estado }),
+        body: JSON.stringify({ estado, comentario }),
       });
       const data = await response.json();
 
@@ -209,7 +215,7 @@ export default function TallerDashboard() {
 
   const actualizarCampoCotizacion = (
     solicitudId: string,
-    field: "diagnostico" | "servicios" | "horas" | "materiales",
+    field: "diagnostico" | "servicios" | "horas" | "materiales" | "comentario",
     value: string
   ) => {
     setQuoteForms((current) => ({
@@ -219,6 +225,7 @@ export default function TallerDashboard() {
         servicios: current[solicitudId]?.servicios || "",
         horas: current[solicitudId]?.horas || "",
         materiales: current[solicitudId]?.materiales || "",
+        comentario: current[solicitudId]?.comentario || "",
         [field]: value,
       },
     }));
@@ -235,6 +242,7 @@ export default function TallerDashboard() {
         servicios: item.taller_diagnostico?.servicios || "",
         horas: item.taller_diagnostico?.horas || "",
         materiales: item.taller_diagnostico?.materiales || "",
+        comentario: item.observacion || "",
       },
     }));
   };
@@ -246,6 +254,7 @@ export default function TallerDashboard() {
       servicios: "",
       horas: "",
       materiales: "",
+      comentario: "",
     };
 
     if (!form.diagnostico.trim() || !form.servicios.trim() || !form.horas.trim() || !form.materiales.trim()) {
@@ -392,6 +401,7 @@ export default function TallerDashboard() {
       servicios: item.taller_diagnostico?.servicios || "",
       horas: item.taller_diagnostico?.horas || "",
       materiales: item.taller_diagnostico?.materiales || "",
+      comentario: item.observacion || "",
     };
 
     return (
@@ -445,12 +455,36 @@ export default function TallerDashboard() {
                 </TouchableOpacity>
               ) : null}
               {options?.showReturn ? (
-                <TouchableOpacity
-                  style={styles.dangerButton}
-                  onPress={() => actualizarEstadoSolicitud(id, "rechazada_taller", "La solicitud fue devuelta al administrador.")}
-                >
-                  <Text style={styles.dangerButtonText}>Devolver</Text>
-                </TouchableOpacity>
+                <View style={styles.returnBlock}>
+                  <TextInput
+                    style={[styles.quoteInput, styles.quoteInputMultiline]}
+                    value={quoteForm.comentario}
+                    onChangeText={(value) => actualizarCampoCotizacion(id, "comentario", value)}
+                    placeholder="Comentario para devolver al administrador"
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    maxLength={200}
+                  />
+                  <Text style={styles.commentCounter}>{quoteForm.comentario.length}/200</Text>
+                  <TouchableOpacity
+                    style={styles.dangerButton}
+                    onPress={() => {
+                      const comentario = quoteForm.comentario.trim();
+                      if (!comentario) {
+                        Alert.alert("Comentario requerido", "Debes escribir un comentario para devolver la solicitud.");
+                        return;
+                      }
+                      actualizarEstadoSolicitud(
+                        id,
+                        "rechazada_taller",
+                        "La solicitud fue devuelta al administrador.",
+                        comentario
+                      );
+                    }}
+                  >
+                    <Text style={styles.dangerButtonText}>Devolver</Text>
+                  </TouchableOpacity>
+                </View>
               ) : null}
               {options?.showDiagnosticSend ? (
                 <TouchableOpacity
@@ -821,11 +855,13 @@ const styles = StyleSheet.create({
   infoBanner: { marginTop: 12, backgroundColor: "#eff6ff", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: "#bfdbfe", flexDirection: "row", alignItems: "flex-start", gap: 8 },
   infoBannerText: { color: "#1d4ed8", flex: 1, lineHeight: 20, fontWeight: "600" },
   actionRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
+  returnBlock: { flex: 1, minWidth: 220 },
   quoteFormCard: { marginTop: 14, backgroundColor: "#ffffff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#dbe4f0", gap: 10 },
   quoteFormTitle: { color: "#08121f", fontSize: 16, fontWeight: "800" },
   quoteFormLabel: { color: "#334155", fontWeight: "700", marginTop: 2 },
   quoteInput: { backgroundColor: "#f8fbff", borderRadius: 14, borderWidth: 1, borderColor: "#dbe4f0", paddingHorizontal: 14, paddingVertical: 12, color: "#08121f" },
   quoteInputMultiline: { minHeight: 92, textAlignVertical: "top" },
+  commentCounter: { marginTop: 6, marginBottom: 8, color: "#64748b", fontSize: 12, textAlign: "right" },
   primaryButton: { backgroundColor: "#2563eb", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
   primaryButtonText: { color: "#ffffff", fontWeight: "800" },
   secondaryButton: { backgroundColor: "#eef2ff", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },

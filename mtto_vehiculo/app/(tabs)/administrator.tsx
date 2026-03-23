@@ -28,9 +28,11 @@ import storage from "../../constants/storage";
 
 type Solicitud = {
   id?: number | string;
+  solicitud_origen_id?: number | string | null;
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  observacion?: string | null;
   fecha?: string | null;
   vehiculo?: {
     marca?: string;
@@ -89,6 +91,13 @@ type DirectoryItem = {
   estado?: string;
   especialidad?: string | null;
 };
+
+const normalizeProviderSpecialties = (especialidad?: string | null) =>
+  (especialidad || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => (item === "aceite" ? "cambio de aceite" : item));
 
 type Notificacion = {
   id?: number | string;
@@ -370,7 +379,7 @@ export default function AdministratorDashboardScreen() {
 
     if (value.includes("bateria")) return "bateria";
     if (value.includes("llanta")) return "llantas";
-    if (value.includes("aceite") || value.includes("filtro")) return "aceite";
+    if (value.includes("aceite") || value.includes("filtro")) return "cambio de aceite";
 
     return null;
   };
@@ -594,11 +603,33 @@ export default function AdministratorDashboardScreen() {
   };
 
   const pendingRequests = useMemo(
-    () =>
-      solicitudes.filter((item) => {
+    () => {
+      const hiddenOriginIds = new Set(
+        solicitudes
+          .filter((item) => {
+            const status = normalizeStatus(item.estado);
+            return (
+              item.solicitud_origen_id != null &&
+              (
+                isSentToClientStatus(status) ||
+                isApprovedStatus(status) ||
+                isRejectedClientStatus(status)
+              )
+            );
+          })
+          .map((item) => Number(item.solicitud_origen_id))
+          .filter((value) => Number.isFinite(value))
+      );
+
+      return solicitudes.filter((item) => {
         const status = normalizeStatus(item.estado);
-        return status === "pendiente" || isCreatedStatus(status) || status === "en_revision";
-      }),
+        if (!(status === "pendiente" || isCreatedStatus(status) || status === "en_revision")) {
+          return false;
+        }
+
+        return !hiddenOriginIds.has(Number(item.id));
+      });
+    },
     [solicitudes]
   );
   const archivedRequests = useMemo(
@@ -1282,11 +1313,21 @@ export default function AdministratorDashboardScreen() {
                 filteredPendingRequests.map((item) => {
                   const especialidadSolicitud = obtenerEspecialidadSolicitud(item.tipo_servicio);
                   const esCotizacion = esSolicitudParaCotizar(item.tipo_servicio);
+                  const esMantenimiento = esSolicitudMantenimientoTaller(item.tipo_servicio);
                   const proveedoresCompatibles = especialidadSolicitud
                     ? proveedores.filter(
-                        (proveedor) =>
-                          (proveedor.especialidad || "").toLowerCase() === especialidadSolicitud
+                        (proveedor) => {
+                          const especialidadesProveedor = normalizeProviderSpecialties(proveedor.especialidad);
+                          return ["general", especialidadSolicitud].some((item) =>
+                            especialidadesProveedor.includes(item)
+                          );
+                        }
                       )
+                    : esMantenimiento
+                      ? proveedores.filter(
+                          (proveedor) =>
+                            normalizeProviderSpecialties(proveedor.especialidad).includes("general")
+                        )
                     : proveedores;
 
                   return (
@@ -1807,6 +1848,9 @@ export default function AdministratorDashboardScreen() {
                   </Text>
                   <Text style={styles.requestText}>Servicio: {item.tipo_servicio || "Sin tipo"}</Text>
                   <Text style={styles.requestText}>Problema: {item.problema || "Sin descripcion"}</Text>
+                  {(item.estado || "").toLowerCase() === "rechazada_taller" && item.observacion ? (
+                    <Text style={styles.requestText}>Comentario taller: {item.observacion}</Text>
+                  ) : null}
                   {["omitida_admin", "devuelta"].includes((item.estado || "").toLowerCase()) &&
                   respuestasCotizacion.length > 0
                     ? respuestasCotizacion.map((respuesta, index) => (

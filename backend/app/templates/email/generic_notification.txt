@@ -1,0 +1,7 @@
+Hola $nombre,
+
+$mensaje
+
+Referencia: $referencia
+
+Equipo MTTO Vehicular

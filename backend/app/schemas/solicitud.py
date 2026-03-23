@@ -9,6 +9,7 @@ class SolicitudCreate(BaseModel):
 
 class SolicitudEstadoUpdate(BaseModel):
     estado: str
+    comentario: str | None = Field(default=None, max_length=200)
 
 
 class SolicitudCotizacionUpdate(BaseModel):
@@ -36,11 +37,11 @@ class SolicitudRespuestaProveedorUpdate(BaseModel):
 
 
 class SolicitudProveedorDevolucion(BaseModel):
-    comentario: str = Field(..., max_length=100)
+    comentario: str = Field(..., max_length=200)
 
 
 class SolicitudAdministradorDevolucion(BaseModel):
-    comentario: str = Field(..., max_length=100)
+    comentario: str = Field(..., max_length=200)
 
 
 class SolicitudAdministradorOmitirCotizacion(BaseModel):

@@ -1,10 +1,13 @@
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
-from app.database import engine, Base
 from os import getenv
+
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+load_dotenv()
+
+from app.database import engine, Base
 from app.routes import auth
 from app.routes import usuarios
 from app.routes import vehiculos
@@ -12,8 +15,6 @@ from app.routes import talleres
 from app.routes import proveedores
 from app.routes import solicitudes
 from app.routes import notificaciones
-
-load_dotenv()
 
 app = FastAPI()
 
@@ -41,6 +42,7 @@ app.include_router(notificaciones.router)
 Base.metadata.create_all(bind=engine)
 
 with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS solicitud_origen_id INTEGER"))
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS diagnostico_taller TEXT"))
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS servicios_taller TEXT"))
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS horas_taller VARCHAR(20)"))

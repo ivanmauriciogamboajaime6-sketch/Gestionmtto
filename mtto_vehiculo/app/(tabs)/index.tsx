@@ -49,6 +49,7 @@ type Vehiculo = {
 
 type Solicitud = {
   id?: number | string;
+  solicitud_origen_id?: number | string | null;
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
@@ -94,6 +95,18 @@ type Notificacion = {
   mensaje?: string;
   tipo?: string;
   leida?: boolean;
+};
+
+const filterVisibleClientRequests = (items: Solicitud[]) => {
+  const hiddenOriginIds = new Set(
+    items
+      .map((item) => item.solicitud_origen_id)
+      .filter((value) => value != null)
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+  );
+
+  return items.filter((item) => !hiddenOriginIds.has(Number(item.id)));
 };
 
 const dashboardServices = [
@@ -227,7 +240,9 @@ export default function Dashboard() {
       const notificacionesData = await notificacionesResponse.json();
       const items = Array.isArray(data) ? data : [];
       setVehiculos(items);
-      setSolicitudes(Array.isArray(solicitudesData) ? solicitudesData : []);
+      setSolicitudes(
+        filterVisibleClientRequests(Array.isArray(solicitudesData) ? solicitudesData : [])
+      );
       setTalleres(Array.isArray(talleresData) ? talleresData : []);
       setNotificaciones(Array.isArray(notificacionesData) ? notificacionesData : []);
 

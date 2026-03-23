@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt_handler import get_current_user
 from app.database import get_db
-from app.models.notificacion import Notificacion
 from app.models.solicitud import Solicitud
 from app.models.usuario import Usuario
 from app.models.vehiculo import Vehiculo
@@ -20,6 +19,11 @@ from app.schemas.solicitud import (
     SolicitudProveedorDevolucion,
     SolicitudEstadoUpdate,
     SolicitudRespuestaProveedorUpdate,
+)
+from app.services.notification_service import (
+    NotificationRecipient,
+    build_recipient,
+    notification_service,
 )
 
 router = APIRouter()
@@ -124,15 +128,25 @@ def crear_notificacion(
     mensaje: str,
     tipo: str,
 ):
-    db.add(
-        Notificacion(
-            usuario_id=usuario_id,
-            titulo=titulo,
-            mensaje=mensaje,
-            tipo=tipo,
-            leida=False,
-        )
-    )
+    notification_service.create_in_app_notification(db, usuario_id, titulo, mensaje, tipo)
+
+
+def get_user_recipient(db: Session, user_id: int | None) -> NotificationRecipient | None:
+    if not user_id:
+        return None
+
+    user = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not user:
+        return None
+
+    return build_recipient(user)
+
+
+def get_role_recipients(db: Session, role: str) -> list[NotificationRecipient]:
+    return [
+        build_recipient(user)
+        for user in db.query(Usuario).filter(Usuario.rol == role).all()
+    ]
 
 
 def append_pipe_values(current: str | None, incoming: str) -> str:
@@ -359,15 +373,23 @@ def crear_solicitud(
     db.commit()
     db.refresh(solicitud)
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
-            db,
-            administrador.id,
-            f"Solicitud #{solicitud.id} nueva",
-            f"El cliente {user['nombre']} creo la solicitud #{solicitud.id}.",
-            "solicitud_cliente",
-        )
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} nueva",
+        f"El cliente {user['nombre']} creo la solicitud #{solicitud.id}.",
+        "solicitud_cliente",
+        email_subject=f"Nueva solicitud #{solicitud.id}",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": (
+                f"El cliente {user['nombre']} creo la solicitud #{solicitud.id}.\n"
+                f"Tipo de servicio: {solicitud.tipo}\n"
+                f"Estado inicial: {solicitud.estado}"
+            ),
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
     db.commit()
 
     return {"mensaje": "solicitud creada", "id": solicitud.id, "estado": solicitud.estado}
@@ -447,9 +469,11 @@ def obtener_solicitudes(
       resultado.append(
           {
               "id": solicitud.id,
+              "solicitud_origen_id": solicitud.solicitud_origen_id,
               "tipo_servicio": solicitud.tipo,
               "problema": solicitud.descripcion,
               "estado": solicitud.estado,
+              "observacion": solicitud.observacion,
               "fecha": solicitud.fecha.isoformat() if solicitud.fecha else None,
               "fecha_recepcion": fecha_recepcion,
               "vehiculo": {
@@ -582,28 +606,55 @@ def actualizar_estado_solicitud(
                 status_code=403,
                 detail="El taller solo puede mover solicitudes del flujo de taller",
             )
+        if data.estado == "rechazada_taller":
+            comentario = (data.comentario or "").strip()
+            if not comentario:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Debes escribir un comentario para devolver la solicitud",
+                )
+            solicitud.observacion = comentario
 
+    previous_status = solicitud.estado
     solicitud.estado = data.estado
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
+    administradores = get_role_recipients(db, "administrador")
     if user["rol"] == "taller" and data.estado == "diagnosticada":
-        for administrador in administradores:
-            crear_notificacion(
-                db,
-                administrador.id,
-                f"Solicitud #{solicitud.id} diagnosticada",
-                f"El taller {user['nombre']} envio el diagnostico de la solicitud #{solicitud.id}.",
-                "diagnostico_taller",
-            )
+        notification_service.notify_users(
+            db,
+            administradores,
+            f"Solicitud #{solicitud.id} diagnosticada",
+            f"El taller {user['nombre']} envio el diagnostico de la solicitud #{solicitud.id}.",
+            "diagnostico_taller",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": f"El taller {user['nombre']} envio el diagnostico de la solicitud #{solicitud.id}.",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
     if user["rol"] == "taller" and data.estado == "rechazada_taller":
-        for administrador in administradores:
-            crear_notificacion(
-                db,
-                administrador.id,
-                f"Solicitud #{solicitud.id} rechazada por taller",
-                f"El taller {user['nombre']} devolvio la solicitud #{solicitud.id}.",
-                "rechazo_taller",
-            )
+        notification_service.notify_users(
+            db,
+            administradores,
+            f"Solicitud #{solicitud.id} rechazada por taller",
+            f"El taller {user['nombre']} devolvio la solicitud #{solicitud.id}.",
+            "rechazo_taller",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": f"El taller {user['nombre']} devolvio la solicitud #{solicitud.id}.",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
+
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_solicitud_status_changed(
+            db,
+            solicitud,
+            cliente_recipient,
+            previous_status,
+            actor_name=user["nombre"],
+        )
 
     db.commit()
     db.refresh(solicitud)
@@ -636,20 +687,33 @@ def enviar_diagnostico_taller(
     if len(horas) > 20:
         raise HTTPException(status_code=400, detail="El formato de horas no es valido")
 
+    previous_status = solicitud.estado
     solicitud.diagnostico_taller = data.diagnostico.strip()
     solicitud.servicios_taller = data.servicios.strip()
     solicitud.horas_taller = horas
     solicitud.materiales_taller = data.materiales.strip()
     solicitud.estado = "diagnosticada"
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} diagnosticada",
+        f"El taller {user['nombre']} envio cotizacion y diagnostico para la solicitud #{solicitud.id}.",
+        "diagnostico_taller",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"El taller {user['nombre']} envio cotizacion y diagnostico para la solicitud #{solicitud.id}.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_solicitud_status_changed(
             db,
-            administrador.id,
-            f"Solicitud #{solicitud.id} diagnosticada",
-            f"El taller {user['nombre']} envio cotizacion y diagnostico para la solicitud #{solicitud.id}.",
-            "diagnostico_taller",
+            solicitud,
+            cliente_recipient,
+            previous_status,
+            actor_name=user["nombre"],
         )
 
     db.commit()
@@ -701,14 +765,18 @@ def enviar_a_proveedores(
         ]
     )
     solicitud.estado = "en_cotizacion" if es_servicio_cotizable(solicitud.tipo) else "cotizando"
-    for proveedor in proveedores:
-        crear_notificacion(
-            db,
-            proveedor.id,
-            f"Cotizacion #{solicitud.id} nueva",
-            f"El administrador te envio la solicitud #{solicitud.id} para cotizar.",
-            "solicitud_proveedor",
-        )
+    notification_service.notify_users(
+        db,
+        [build_recipient(proveedor) for proveedor in proveedores],
+        f"Cotizacion #{solicitud.id} nueva",
+        f"El administrador te envio la solicitud #{solicitud.id} para cotizar.",
+        "solicitud_proveedor",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"El administrador te envio la solicitud #{solicitud.id} para cotizar.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
     db.commit()
     db.refresh(solicitud)
 
@@ -752,14 +820,18 @@ def enviar_a_talleres(
         else "recibida"
     )
 
-    for taller in talleres:
-        crear_notificacion(
-            db,
-            taller.id,
-            f"Solicitud #{solicitud.id} nueva",
-            f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.",
-            "solicitud_taller",
-        )
+    notification_service.notify_users(
+        db,
+        [build_recipient(taller) for taller in talleres],
+        f"Solicitud #{solicitud.id} nueva",
+        f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.",
+        "solicitud_taller",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
 
     db.commit()
     db.refresh(solicitud)
@@ -787,13 +859,20 @@ def archivar_solicitud(
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
     solicitud.estado = "cancelada" if es_servicio_cotizable(solicitud.tipo) else "archivada"
-    crear_notificacion(
-        db,
-        solicitud.usuario_id,
-        f"Solicitud #{solicitud.id} descartada",
-        "Tu solicitud fue descartada. Si quieres, puedes volver a solicitar.",
-        "solicitud_descartada",
-    )
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_user(
+            db,
+            cliente_recipient,
+            f"Solicitud #{solicitud.id} descartada",
+            "Tu solicitud fue descartada. Si quieres, puedes volver a solicitar.",
+            "solicitud_descartada",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": "Tu solicitud fue descartada. Si quieres, puedes volver a solicitar.",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
     db.commit()
     db.refresh(solicitud)
 
@@ -840,6 +919,7 @@ def enviar_solicitud_cliente(
         formulario_enviado = formularios[response_index]
 
         solicitud_cliente = Solicitud(
+            solicitud_origen_id=solicitud.id,
             usuario_id=solicitud.usuario_id,
             vehiculo_id=solicitud.vehiculo_id,
             tipo=solicitud.tipo,
@@ -892,6 +972,7 @@ def enviar_solicitud_cliente(
     else:
         if es_solicitud_mantenimiento_taller(solicitud.tipo):
             solicitud_cliente = Solicitud(
+                solicitud_origen_id=solicitud.id,
                 usuario_id=solicitud.usuario_id,
                 vehiculo_id=solicitud.vehiculo_id,
                 tipo=solicitud.tipo,
@@ -920,13 +1001,20 @@ def enviar_solicitud_cliente(
                 else "enviado_cliente"
             )
 
-    crear_notificacion(
-        db,
-        solicitud.usuario_id,
-        f"Cotizacion #{solicitud.id} disponible",
-        f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
-        "cotizacion_cliente",
-    )
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_user(
+            db,
+            cliente_recipient,
+            f"Cotizacion #{solicitud.id} disponible",
+            f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
+            "cotizacion_cliente",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
     db.commit()
     db.refresh(solicitud)
 
@@ -973,6 +1061,7 @@ def omitir_solicitud_cliente(
         formulario_omitido = formularios[response_index]
 
         historial_admin = Solicitud(
+            solicitud_origen_id=solicitud.id,
             usuario_id=solicitud.usuario_id,
             vehiculo_id=solicitud.vehiculo_id,
             tipo=solicitud.tipo,
@@ -1019,6 +1108,7 @@ def omitir_solicitud_cliente(
         solicitud.estado = resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
     else:
         historial_admin = Solicitud(
+            solicitud_origen_id=solicitud.id,
             usuario_id=solicitud.usuario_id,
             vehiculo_id=solicitud.vehiculo_id,
             tipo=solicitud.tipo,
@@ -1057,15 +1147,18 @@ def omitir_solicitud_cliente(
         solicitud.precio = None
         solicitud.observacion = None
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
-            db,
-            administrador.id,
-            f"Solicitud #{solicitud.id} omitida",
-            f"La solicitud #{solicitud.id} guardo una cotizacion en historial administrativo.",
-            "solicitud_omitida_admin",
-        )
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} omitida",
+        f"La solicitud #{solicitud.id} guardo una cotizacion en historial administrativo.",
+        "solicitud_omitida_admin",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"La solicitud #{solicitud.id} guardo una cotizacion en historial administrativo.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
 
     db.commit()
     db.refresh(solicitud)
@@ -1118,15 +1211,18 @@ def responder_cotizacion_proveedor(
         else "cotizando" if proveedores_restantes
         else resolve_estado_desde_proveedores(proveedores_estado, solicitud.tipo)
     )
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
-            db,
-            administrador.id,
-            f"Cotizacion #{solicitud.id} recibida",
-            f"El proveedor {user['nombre']} respondio la solicitud #{solicitud.id}.",
-            "respuesta_proveedor",
-        )
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Cotizacion #{solicitud.id} recibida",
+        f"El proveedor {user['nombre']} respondio la solicitud #{solicitud.id}.",
+        "respuesta_proveedor",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"El proveedor {user['nombre']} respondio la solicitud #{solicitud.id}.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
     db.commit()
     db.refresh(solicitud)
 
@@ -1173,15 +1269,18 @@ def devolver_solicitud_proveedor(
         if solicitud.estado in {"devuelto_proveedor", "rechazada_proveedor"}:
             solicitud.observacion = data.comentario.strip()
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
-            db,
-            administrador.id,
-            f"Solicitud #{solicitud.id} devuelta por proveedor",
-            f"Se ha devuelto tu solicitud #{solicitud.id} con el comentario: {data.comentario.strip()}",
-            "devolucion_proveedor",
-        )
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} devuelta por proveedor",
+        f"Se ha devuelto tu solicitud #{solicitud.id} con el comentario: {data.comentario.strip()}",
+        "devolucion_proveedor",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"Se ha devuelto tu solicitud #{solicitud.id} con el comentario: {data.comentario.strip()}",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
 
     db.commit()
     db.refresh(solicitud)
@@ -1217,13 +1316,20 @@ def devolver_solicitud_cliente(
     )
     solicitud.observacion = data.comentario.strip()
 
-    crear_notificacion(
-        db,
-        solicitud.usuario_id,
-        f"Solicitud #{solicitud.id} devuelta al cliente",
-        f"Tu solicitud #{solicitud.id} fue devuelta con el comentario: {data.comentario.strip()}",
-        "devolucion_cliente",
-    )
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_user(
+            db,
+            cliente_recipient,
+            f"Solicitud #{solicitud.id} devuelta al cliente",
+            f"Tu solicitud #{solicitud.id} fue devuelta con el comentario: {data.comentario.strip()}",
+            "devolucion_cliente",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": f"Tu solicitud #{solicitud.id} fue devuelta con el comentario: {data.comentario.strip()}",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
 
     db.commit()
     db.refresh(solicitud)
@@ -1259,33 +1365,54 @@ def aprobar_solicitud_cliente(
 
     solicitud.estado = "aprobada"
 
-    administradores = db.query(Usuario).filter(Usuario.rol == "administrador").all()
-    for administrador in administradores:
-        crear_notificacion(
-            db,
-            administrador.id,
-            f"Solicitud #{solicitud.id} aprobada por cliente",
-            f"El cliente {user['nombre']} aprobo la solicitud #{solicitud.id}.",
-            "aprobacion_cliente",
-        )
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} aprobada por cliente",
+        f"El cliente {user['nombre']} aprobo la solicitud #{solicitud.id}.",
+        "aprobacion_cliente",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": f"El cliente {user['nombre']} aprobo la solicitud #{solicitud.id}.",
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
 
     if solicitud.proveedor_cotizo_id:
-        crear_notificacion(
-            db,
-            int(solicitud.proveedor_cotizo_id),
-            f"Solicitud #{solicitud.id} aprobada",
-            f"El cliente aprobo la solicitud #{solicitud.id} y ya puedes ejecutar el servicio.",
-            "aprobacion_proveedor",
-        )
-    elif es_solicitud_mantenimiento_taller(solicitud.tipo):
-        for taller_id in parse_proveedores_ids(solicitud.proveedores_ids):
-            crear_notificacion(
+        proveedor_recipient = get_user_recipient(db, int(solicitud.proveedor_cotizo_id))
+        if proveedor_recipient:
+            notification_service.notify_user(
                 db,
-                taller_id,
+                proveedor_recipient,
                 f"Solicitud #{solicitud.id} aprobada",
-                f"El cliente aprobo la solicitud #{solicitud.id} y el taller ya puede ejecutar el servicio.",
-                "aprobacion_taller",
+                f"El cliente aprobo la solicitud #{solicitud.id} y ya puedes ejecutar el servicio.",
+                "aprobacion_proveedor",
+                email_template="generic_notification",
+                email_context={
+                    "mensaje": f"El cliente aprobo la solicitud #{solicitud.id} y ya puedes ejecutar el servicio.",
+                    "referencia": f"Solicitud #{solicitud.id}",
+                },
             )
+    elif es_solicitud_mantenimiento_taller(solicitud.tipo):
+        notification_service.notify_users(
+            db,
+            [
+                recipient
+                for recipient in (
+                    get_user_recipient(db, taller_id)
+                    for taller_id in parse_proveedores_ids(solicitud.proveedores_ids)
+                )
+                if recipient is not None
+            ],
+            f"Solicitud #{solicitud.id} aprobada",
+            f"El cliente aprobo la solicitud #{solicitud.id} y el taller ya puede ejecutar el servicio.",
+            "aprobacion_taller",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": f"El cliente aprobo la solicitud #{solicitud.id} y el taller ya puede ejecutar el servicio.",
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
 
     db.commit()
     db.refresh(solicitud)

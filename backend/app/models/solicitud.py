@@ -7,6 +7,7 @@ class Solicitud(Base):
     __tablename__ = "solicitudes"
 
     id = Column(Integer, primary_key=True, index=True)
+    solicitud_origen_id = Column(Integer, ForeignKey("solicitudes.id"), nullable=True)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
     vehiculo_id = Column(Integer, ForeignKey("vehiculos.id"))
     tipo = Column(Text)
