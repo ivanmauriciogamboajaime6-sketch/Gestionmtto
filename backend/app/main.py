@@ -47,6 +47,10 @@ with engine.begin() as connection:
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS servicios_taller TEXT"))
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS horas_taller VARCHAR(20)"))
     connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS materiales_taller TEXT"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS disponibilidad_cliente TEXT"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS comentario_taller TEXT"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS fecha_disponible_taller VARCHAR(30)"))
+    connection.execute(text("ALTER TABLE solicitudes ADD COLUMN IF NOT EXISTS horario_disponible_taller VARCHAR(60)"))
 
 
 @app.get("/")

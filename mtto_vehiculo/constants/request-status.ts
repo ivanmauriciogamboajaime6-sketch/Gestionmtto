@@ -2,7 +2,9 @@ export const REQUEST_STATUS = {
   CREATED: "creada",
   IN_REVIEW: "en_revision",
   IN_DIAGNOSIS: "en_diagnostico",
+  IN_WORKSHOP_ASSIGNMENT: "en_asignacion_taller",
   DIAGNOSED: "diagnosticada",
+  PENDING_CLIENT_WORKSHOP_INFO: "pendiente_envio_cliente_taller",
   IN_QUOTATION: "en_cotizacion",
   QUOTED: "cotizada",
   PROPOSAL_READY: "propuesta_armada",
@@ -60,6 +62,7 @@ export function isInDiagnosisStatus(status?: string | null) {
   const normalized = normalizeStatus(status);
   return (
     normalized === REQUEST_STATUS.IN_DIAGNOSIS ||
+    normalized === REQUEST_STATUS.IN_WORKSHOP_ASSIGNMENT ||
     normalized === "diagnostico" ||
     normalized === "recibida"
   );
@@ -69,6 +72,7 @@ export function isDiagnosedStatus(status?: string | null) {
   const normalized = normalizeStatus(status);
   return (
     normalized === REQUEST_STATUS.DIAGNOSED ||
+    normalized === REQUEST_STATUS.PENDING_CLIENT_WORKSHOP_INFO ||
     normalized === "pendiente_aprobacion_admin"
   );
 }
@@ -147,7 +151,9 @@ export function getStatusLabel(status?: string | null) {
 
   if (isCreatedStatus(normalized)) return "Creada";
   if (isInReviewStatus(normalized)) return "En revision";
+  if (normalized === REQUEST_STATUS.IN_WORKSHOP_ASSIGNMENT) return "En asignacion de taller";
   if (isInDiagnosisStatus(normalized)) return "En diagnostico";
+  if (normalized === REQUEST_STATUS.PENDING_CLIENT_WORKSHOP_INFO) return "Pendiente de envio al cliente";
   if (isDiagnosedStatus(normalized)) return "Diagnosticada";
   if (isInQuotationStatus(normalized)) return "En cotizacion";
   if (isQuotedStatus(normalized)) return "Cotizada";

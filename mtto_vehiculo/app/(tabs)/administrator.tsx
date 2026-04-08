@@ -33,6 +33,7 @@ type Solicitud = {
   problema?: string;
   estado?: string;
   observacion?: string | null;
+  disponibilidad_cliente?: string | null;
   fecha?: string | null;
   vehiculo?: {
     marca?: string;
@@ -79,6 +80,11 @@ type Solicitud = {
     servicios?: string | null;
     horas?: string | null;
     materiales?: string | null;
+  };
+  respuesta_taller?: {
+    comentario?: string | null;
+    fecha_disponible?: string | null;
+    horario_disponible?: string | null;
   };
 };
 
@@ -699,6 +705,22 @@ export default function AdministratorDashboardScreen() {
   };
 
   const obtenerEstadoCotizacion = (estado?: string) => {
+    if (normalizeStatus(estado) === "en_asignacion_taller") {
+      return {
+        label: "En asignacion de taller",
+        pillStyle: styles.requestStatusPill,
+        textStyle: styles.requestStatusText,
+      };
+    }
+
+    if (normalizeStatus(estado) === "pendiente_envio_cliente_taller") {
+      return {
+        label: "Pendiente de enviar al cliente",
+        pillStyle: styles.requestStatusPillSuccess,
+        textStyle: styles.requestStatusTextSuccess,
+      };
+    }
+
     if (isInDiagnosisStatus(estado)) {
       return {
         label: "En espera del taller",
@@ -1604,6 +1626,9 @@ export default function AdministratorDashboardScreen() {
                         Fecha y hora de recepcion: {formatDateTime(item.fecha)}
                       </Text>
                       <Text style={styles.requestText}>
+                        Disponibilidad del cliente: {item.disponibilidad_cliente || "Sin registrar"}
+                      </Text>
+                      <Text style={styles.requestText}>
                         Problema: {item.problema || "Sin descripcion"}
                       </Text>
                       <Text style={styles.quoteExpandHint}>
@@ -1611,7 +1636,33 @@ export default function AdministratorDashboardScreen() {
                       </Text>
                     </TouchableOpacity>
 
-                    {expandedQuote && solicitudTaller && isDiagnosedStatus(item.estado) ? (
+                    {expandedQuote && normalizeStatus(item.estado) === "pendiente_envio_cliente_taller" ? (
+                      <View style={styles.providerSelectionCard}>
+                        <View style={styles.quoteSummaryCard}>
+                          <Text style={styles.quoteSummaryTitle}>Respuesta aprobada del taller</Text>
+                          <Text style={styles.requestText}>
+                            Fecha disponible: {item.respuesta_taller?.fecha_disponible || "Sin fecha"}
+                          </Text>
+                          <Text style={styles.requestText}>
+                            Horario disponible: {item.respuesta_taller?.horario_disponible || "Sin horario"}
+                          </Text>
+                          <Text style={styles.requestText}>
+                            Comentario: {item.respuesta_taller?.comentario || "Sin comentario"}
+                          </Text>
+                        </View>
+
+                        <View style={styles.quoteDecisionRow}>
+                          <TouchableOpacity
+                            style={[styles.quoteDecisionButton, styles.quoteDecisionSendButton]}
+                            onPress={() => enviarCotizacionAlCliente(item.id)}
+                          >
+                            <Text style={styles.quoteDecisionSendText}>Enviar al cliente</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : null}
+
+                    {expandedQuote && solicitudTaller && isDiagnosedStatus(item.estado) && normalizeStatus(item.estado) !== "pendiente_envio_cliente_taller" ? (
                       <View style={styles.providerSelectionCard}>
                         {item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales ? (
                           <View style={styles.quoteSummaryCard}>

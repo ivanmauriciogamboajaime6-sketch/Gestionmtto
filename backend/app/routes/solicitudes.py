@@ -15,6 +15,7 @@ from app.schemas.solicitud import (
     SolicitudCotizacionUpdate,
     SolicitudCreate,
     SolicitudDiagnosticoTallerUpdate,
+    SolicitudRespuestaTallerUpdate,
     SolicitudTallerUpdate,
     SolicitudProveedorDevolucion,
     SolicitudEstadoUpdate,
@@ -64,6 +65,8 @@ ESTADOS_VALIDOS = {
     "finalizado",
     "finalizada",
     "rechazada",
+    "en_asignacion_taller",
+    "pendiente_envio_cliente_taller",
 }
 
 
@@ -366,6 +369,7 @@ def crear_solicitud(
         vehiculo_id=data.vehiculo_id,
         tipo=data.tipo,
         descripcion=data.descripcion,
+        disponibilidad_cliente=data.disponibilidad_cliente.strip(),
         estado="creada" if es_servicio_cotizable(data.tipo) else "pendiente",
     )
 
@@ -385,6 +389,7 @@ def crear_solicitud(
             "mensaje": (
                 f"El cliente {user['nombre']} creo la solicitud #{solicitud.id}.\n"
                 f"Tipo de servicio: {solicitud.tipo}\n"
+                f"Disponibilidad del cliente: {solicitud.disponibilidad_cliente or 'No registrada'}\n"
                 f"Estado inicial: {solicitud.estado}"
             ),
             "referencia": f"Solicitud #{solicitud.id}",
@@ -474,6 +479,7 @@ def obtener_solicitudes(
               "problema": solicitud.descripcion,
               "estado": solicitud.estado,
               "observacion": solicitud.observacion,
+              "disponibilidad_cliente": solicitud.disponibilidad_cliente,
               "fecha": solicitud.fecha.isoformat() if solicitud.fecha else None,
               "fecha_recepcion": fecha_recepcion,
               "vehiculo": {
@@ -534,6 +540,11 @@ def obtener_solicitudes(
                   "servicios": solicitud.servicios_taller,
                   "horas": solicitud.horas_taller,
                   "materiales": solicitud.materiales_taller,
+              },
+              "respuesta_taller": {
+                  "comentario": solicitud.comentario_taller,
+                  "fecha_disponible": solicitud.fecha_disponible_taller,
+                  "horario_disponible": solicitud.horario_disponible_taller,
               },
           }
       )
@@ -600,6 +611,8 @@ def actualizar_estado_solicitud(
             "en_proceso",
             "finalizada",
             "rechazada_taller",
+            "en_asignacion_taller",
+            "pendiente_envio_cliente_taller",
         }
         if data.estado not in estados_validos_taller:
             raise HTTPException(
@@ -726,6 +739,78 @@ def enviar_diagnostico_taller(
     }
 
 
+@router.patch("/solicitudes/{solicitud_id}/respuesta-taller")
+def responder_solicitud_taller(
+    solicitud_id: int,
+    data: SolicitudRespuestaTallerUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["rol"] != "taller":
+        raise HTTPException(status_code=403, detail="Solo el taller puede responder solicitudes")
+
+    solicitud = db.query(Solicitud).filter(Solicitud.id == solicitud_id).first()
+
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    if user["id"] not in parse_proveedores_ids(solicitud.proveedores_ids):
+        raise HTTPException(status_code=403, detail="Esta solicitud no fue asignada a este taller")
+
+    comentario = data.comentario.strip()
+    fecha_disponible = data.fecha_disponible.strip()
+    horario_disponible = data.horario_disponible.strip()
+
+    if not comentario or not fecha_disponible or not horario_disponible:
+        raise HTTPException(status_code=400, detail="Debes completar comentario, fecha y horario")
+
+    previous_status = solicitud.estado
+    solicitud.comentario_taller = comentario
+    solicitud.fecha_disponible_taller = fecha_disponible
+    solicitud.horario_disponible_taller = horario_disponible
+    solicitud.estado = "pendiente_envio_cliente_taller"
+
+    notification_service.notify_users(
+        db,
+        get_role_recipients(db, "administrador"),
+        f"Solicitud #{solicitud.id} aprobada por taller",
+        (
+            f"El taller {user['nombre']} aprobo la solicitud #{solicitud.id} y propuso "
+            f"fecha {fecha_disponible} en horario {horario_disponible}."
+        ),
+        "respuesta_taller",
+        email_template="generic_notification",
+        email_context={
+            "mensaje": (
+                f"El taller {user['nombre']} aprobo la solicitud #{solicitud.id}.\n"
+                f"Fecha disponible: {fecha_disponible}\n"
+                f"Horario disponible: {horario_disponible}\n"
+                f"Comentario: {comentario}"
+            ),
+            "referencia": f"Solicitud #{solicitud.id}",
+        },
+    )
+
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_solicitud_status_changed(
+            db,
+            solicitud,
+            cliente_recipient,
+            previous_status,
+            actor_name=user["nombre"],
+        )
+
+    db.commit()
+    db.refresh(solicitud)
+
+    return {
+        "mensaje": "respuesta del taller enviada al administrador",
+        "id": solicitud.id,
+        "estado": solicitud.estado,
+    }
+
+
 @router.patch("/solicitudes/{solicitud_id}/cotizar")
 def enviar_a_proveedores(
     solicitud_id: int,
@@ -814,11 +899,7 @@ def enviar_a_talleres(
 
     solicitud.proveedores_ids = ",".join(str(taller.id) for taller in talleres)
     solicitud.proveedores_estado = None
-    solicitud.estado = (
-        "en_diagnostico"
-        if es_solicitud_mantenimiento_taller(solicitud.tipo)
-        else "recibida"
-    )
+    solicitud.estado = "en_asignacion_taller"
 
     notification_service.notify_users(
         db,
@@ -828,10 +909,31 @@ def enviar_a_talleres(
         "solicitud_taller",
         email_template="generic_notification",
         email_context={
-            "mensaje": f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.",
+            "mensaje": (
+                f"El administrador te envio la solicitud #{solicitud.id} para revision en taller.\n"
+                f"Disponibilidad del cliente: {solicitud.disponibilidad_cliente or 'No registrada'}"
+            ),
             "referencia": f"Solicitud #{solicitud.id}",
         },
     )
+
+    cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
+    if cliente_recipient:
+        notification_service.notify_user(
+            db,
+            cliente_recipient,
+            f"Solicitud #{solicitud.id} en asignacion de taller",
+            f"Tu solicitud #{solicitud.id} fue enviada a taller.",
+            "solicitud_taller_asignada",
+            email_template="generic_notification",
+            email_context={
+                "mensaje": (
+                    f"Tu solicitud #{solicitud.id} fue enviada a taller.\n"
+                    f"Disponibilidad registrada: {solicitud.disponibilidad_cliente or 'No registrada'}"
+                ),
+                "referencia": f"Solicitud #{solicitud.id}",
+            },
+        )
 
     db.commit()
     db.refresh(solicitud)
@@ -932,8 +1034,12 @@ def enviar_solicitud_cliente(
             referencia=normalizar_texto_guardado(formulario_enviado.get("referencia")),
             garantia=normalizar_texto_guardado(formulario_enviado.get("garantia")),
             disponibilidad=normalizar_texto_guardado(formulario_enviado.get("disponibilidad")),
+            disponibilidad_cliente=solicitud.disponibilidad_cliente,
             precio=normalizar_texto_guardado(formulario_enviado.get("precio")),
             observacion=normalizar_texto_guardado(formulario_enviado.get("observacion")),
+            comentario_taller=solicitud.comentario_taller,
+            fecha_disponible_taller=solicitud.fecha_disponible_taller,
+            horario_disponible_taller=solicitud.horario_disponible_taller,
             diagnostico_taller=solicitud.diagnostico_taller,
             servicios_taller=solicitud.servicios_taller,
             horas_taller=solicitud.horas_taller,
@@ -971,29 +1077,36 @@ def enviar_solicitud_cliente(
         )
     else:
         if es_solicitud_mantenimiento_taller(solicitud.tipo):
-            solicitud_cliente = Solicitud(
-                solicitud_origen_id=solicitud.id,
-                usuario_id=solicitud.usuario_id,
-                vehiculo_id=solicitud.vehiculo_id,
-                tipo=solicitud.tipo,
-                descripcion=solicitud.descripcion,
-                estado="enviada_cliente",
-                proveedores_ids=solicitud.proveedores_ids,
-                proveedores_estado=solicitud.proveedores_estado,
-                proveedor_cotizo_id=solicitud.proveedor_cotizo_id,
-                marca=solicitud.marca,
-                referencia=solicitud.referencia,
-                garantia=solicitud.garantia,
-                disponibilidad=solicitud.disponibilidad,
-                precio=solicitud.precio,
-                observacion=solicitud.observacion,
-                diagnostico_taller=solicitud.diagnostico_taller,
-                servicios_taller=solicitud.servicios_taller,
-                horas_taller=solicitud.horas_taller,
-                materiales_taller=solicitud.materiales_taller,
-            )
-            db.add(solicitud_cliente)
-            solicitud.estado = "propuesta_armada"
+            if solicitud.estado == "pendiente_envio_cliente_taller":
+                solicitud.estado = "aprobada"
+            else:
+                solicitud_cliente = Solicitud(
+                    solicitud_origen_id=solicitud.id,
+                    usuario_id=solicitud.usuario_id,
+                    vehiculo_id=solicitud.vehiculo_id,
+                    tipo=solicitud.tipo,
+                    descripcion=solicitud.descripcion,
+                    estado="enviada_cliente",
+                    proveedores_ids=solicitud.proveedores_ids,
+                    proveedores_estado=solicitud.proveedores_estado,
+                    proveedor_cotizo_id=solicitud.proveedor_cotizo_id,
+                    marca=solicitud.marca,
+                    referencia=solicitud.referencia,
+                    garantia=solicitud.garantia,
+                    disponibilidad=solicitud.disponibilidad,
+                    disponibilidad_cliente=solicitud.disponibilidad_cliente,
+                    precio=solicitud.precio,
+                    observacion=solicitud.observacion,
+                    comentario_taller=solicitud.comentario_taller,
+                    fecha_disponible_taller=solicitud.fecha_disponible_taller,
+                    horario_disponible_taller=solicitud.horario_disponible_taller,
+                    diagnostico_taller=solicitud.diagnostico_taller,
+                    servicios_taller=solicitud.servicios_taller,
+                    horas_taller=solicitud.horas_taller,
+                    materiales_taller=solicitud.materiales_taller,
+                )
+                db.add(solicitud_cliente)
+                solicitud.estado = "propuesta_armada"
         else:
             solicitud.estado = (
                 "enviada_cliente"
@@ -1003,15 +1116,34 @@ def enviar_solicitud_cliente(
 
     cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
     if cliente_recipient:
+        is_workshop_schedule = (
+            es_solicitud_mantenimiento_taller(solicitud.tipo)
+            and solicitud.estado == "aprobada"
+        )
         notification_service.notify_user(
             db,
             cliente_recipient,
-            f"Cotizacion #{solicitud.id} disponible",
-            f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
-            "cotizacion_cliente",
+            (
+                f"Informacion de taller #{solicitud.id}"
+                if is_workshop_schedule
+                else f"Cotizacion #{solicitud.id} disponible"
+            ),
+            (
+                f"Tu solicitud #{solicitud.id} ya tiene la informacion del taller para acercarte."
+                if is_workshop_schedule
+                else f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar."
+            ),
+            "informacion_taller_cliente" if is_workshop_schedule else "cotizacion_cliente",
             email_template="generic_notification",
             email_context={
-                "mensaje": f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar.",
+                "mensaje": (
+                    f"Tu solicitud #{solicitud.id} ya tiene la informacion del taller.\n"
+                    f"Fecha disponible: {solicitud.fecha_disponible_taller or 'Sin fecha'}\n"
+                    f"Horario disponible: {solicitud.horario_disponible_taller or 'Sin horario'}\n"
+                    f"Comentario del taller: {solicitud.comentario_taller or 'Sin comentario'}"
+                    if is_workshop_schedule
+                    else f"Tu solicitud #{solicitud.id} ya tiene cotizacion disponible para revisar."
+                ),
                 "referencia": f"Solicitud #{solicitud.id}",
             },
         )
@@ -1073,8 +1205,12 @@ def omitir_solicitud_cliente(
             referencia=normalizar_texto_guardado(formulario_omitido.get("referencia")),
             garantia=normalizar_texto_guardado(formulario_omitido.get("garantia")),
             disponibilidad=normalizar_texto_guardado(formulario_omitido.get("disponibilidad")),
+            disponibilidad_cliente=solicitud.disponibilidad_cliente,
             precio=normalizar_texto_guardado(formulario_omitido.get("precio")),
             observacion=normalizar_texto_guardado(formulario_omitido.get("observacion")),
+            comentario_taller=solicitud.comentario_taller,
+            fecha_disponible_taller=solicitud.fecha_disponible_taller,
+            horario_disponible_taller=solicitud.horario_disponible_taller,
             diagnostico_taller=solicitud.diagnostico_taller,
             servicios_taller=solicitud.servicios_taller,
             horas_taller=solicitud.horas_taller,
@@ -1121,8 +1257,12 @@ def omitir_solicitud_cliente(
             referencia=solicitud.referencia,
             garantia=solicitud.garantia,
             disponibilidad=solicitud.disponibilidad,
+            disponibilidad_cliente=solicitud.disponibilidad_cliente,
             precio=solicitud.precio,
             observacion=solicitud.observacion,
+            comentario_taller=solicitud.comentario_taller,
+            fecha_disponible_taller=solicitud.fecha_disponible_taller,
+            horario_disponible_taller=solicitud.horario_disponible_taller,
             diagnostico_taller=solicitud.diagnostico_taller,
             servicios_taller=solicitud.servicios_taller,
             horas_taller=solicitud.horas_taller,

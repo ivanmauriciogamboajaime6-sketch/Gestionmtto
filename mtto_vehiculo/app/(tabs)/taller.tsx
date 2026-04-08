@@ -35,12 +35,12 @@ type Solicitud = {
   problema?: string;
   estado?: string;
   observacion?: string | null;
+  disponibilidad_cliente?: string | null;
   fecha?: string | null;
-  taller_diagnostico?: {
-    diagnostico?: string | null;
-    servicios?: string | null;
-    horas?: string | null;
-    materiales?: string | null;
+  respuesta_taller?: {
+    comentario?: string | null;
+    fecha_disponible?: string | null;
+    horario_disponible?: string | null;
   };
 };
 
@@ -117,7 +117,7 @@ export default function TallerDashboard() {
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [openQuoteFormId, setOpenQuoteFormId] = useState<string | null>(null);
   const [quoteForms, setQuoteForms] = useState<
-    Record<string, { diagnostico: string; servicios: string; horas: string; materiales: string; comentario: string }>
+    Record<string, { comentario: string; fechaDisponible: string; horarioDisponible: string }>
   >({});
 
   useEffect(() => {
@@ -215,17 +215,15 @@ export default function TallerDashboard() {
 
   const actualizarCampoCotizacion = (
     solicitudId: string,
-    field: "diagnostico" | "servicios" | "horas" | "materiales" | "comentario",
+    field: "comentario" | "fechaDisponible" | "horarioDisponible",
     value: string
   ) => {
     setQuoteForms((current) => ({
       ...current,
       [solicitudId]: {
-        diagnostico: current[solicitudId]?.diagnostico || "",
-        servicios: current[solicitudId]?.servicios || "",
-        horas: current[solicitudId]?.horas || "",
-        materiales: current[solicitudId]?.materiales || "",
         comentario: current[solicitudId]?.comentario || "",
+        fechaDisponible: current[solicitudId]?.fechaDisponible || "",
+        horarioDisponible: current[solicitudId]?.horarioDisponible || "",
         [field]: value,
       },
     }));
@@ -238,63 +236,58 @@ export default function TallerDashboard() {
     setQuoteForms((current) => ({
       ...current,
       [solicitudId]: current[solicitudId] || {
-        diagnostico: item.taller_diagnostico?.diagnostico || "",
-        servicios: item.taller_diagnostico?.servicios || "",
-        horas: item.taller_diagnostico?.horas || "",
-        materiales: item.taller_diagnostico?.materiales || "",
-        comentario: item.observacion || "",
+        comentario: item.respuesta_taller?.comentario || item.observacion || "",
+        fechaDisponible: item.respuesta_taller?.fecha_disponible || "",
+        horarioDisponible: item.respuesta_taller?.horario_disponible || "",
       },
     }));
   };
 
-  const enviarCotizacionTaller = async (item: Solicitud) => {
+  const aprobarSolicitudTaller = async (item: Solicitud) => {
     const solicitudId = String(item.id ?? "");
     const form = quoteForms[solicitudId] || {
-      diagnostico: "",
-      servicios: "",
-      horas: "",
-      materiales: "",
       comentario: "",
+      fechaDisponible: "",
+      horarioDisponible: "",
     };
 
-    if (!form.diagnostico.trim() || !form.servicios.trim() || !form.horas.trim() || !form.materiales.trim()) {
-      Alert.alert("Campos requeridos", "Debes completar diagnostico, servicios, horas y materiales.");
+    if (!form.comentario.trim() || !form.fechaDisponible.trim() || !form.horarioDisponible.trim()) {
+      Alert.alert("Campos requeridos", "Debes completar comentario, fecha y horario disponible.");
       return;
     }
 
-    if (!/^\d{1,2}(:\d{2})?$/.test(form.horas.trim())) {
-      Alert.alert("Formato invalido", "Las horas deben ir en formato 2 o 02:30.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(form.fechaDisponible.trim())) {
+      Alert.alert("Fecha invalida", "La fecha debe ir en formato YYYY-MM-DD.");
       return;
     }
 
     try {
       const token = await getToken();
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/diagnostico-taller`, {
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-taller`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          diagnostico: form.diagnostico.trim(),
-          servicios: form.servicios.trim(),
-          horas: form.horas.trim(),
-          materiales: form.materiales.trim(),
+          comentario: form.comentario.trim(),
+          fecha_disponible: form.fechaDisponible.trim(),
+          horario_disponible: form.horarioDisponible.trim(),
         }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion al administrador");
+        Alert.alert("Error", data.detail || "No se pudo enviar la respuesta al administrador");
         return;
       }
 
       setOpenQuoteFormId(null);
       await cargarSolicitudes();
-      Alert.alert("Enviado", "La cotizacion y el diagnostico fueron enviados al administrador.");
+      Alert.alert("Enviado", "La aprobacion del taller fue enviada al administrador.");
     } catch (error) {
-      console.log("error enviando diagnostico taller", error);
+      console.log("error enviando respuesta taller", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
     }
   };
@@ -397,11 +390,9 @@ export default function TallerDashboard() {
     const priority = priorities[getPriority(item)];
     const isQuoteFormOpen = openQuoteFormId === id;
     const quoteForm = quoteForms[id] || {
-      diagnostico: item.taller_diagnostico?.diagnostico || "",
-      servicios: item.taller_diagnostico?.servicios || "",
-      horas: item.taller_diagnostico?.horas || "",
-      materiales: item.taller_diagnostico?.materiales || "",
-      comentario: item.observacion || "",
+      comentario: item.respuesta_taller?.comentario || item.observacion || "",
+      fechaDisponible: item.respuesta_taller?.fecha_disponible || "",
+      horarioDisponible: item.respuesta_taller?.horario_disponible || "",
     };
 
     return (
@@ -424,6 +415,7 @@ export default function TallerDashboard() {
         <Text style={styles.metaText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
         <Text style={styles.metaText}>Vehiculo: {getVehicleName(item)}</Text>
         <Text style={styles.metaText}>Problema: {item.problema || "Sin descripcion"}</Text>
+        <Text style={styles.metaText}>Disponibilidad cliente: {item.disponibilidad_cliente || "Sin registrar"}</Text>
         <Text style={styles.metaText}>Fecha: {formatDateTime(item.fecha)}</Text>
 
         <View style={[styles.priorityPill, { backgroundColor: priority.bg, borderColor: priority.border }]}>
@@ -440,7 +432,7 @@ export default function TallerDashboard() {
             {options?.showInfo ? (
               <View style={styles.infoBanner}>
                 <MaterialCommunityIcons name="information-outline" size={18} color="#2563eb" />
-                <Text style={styles.infoBannerText}>El administrador aprueba y el taller ejecuta y reporta.</Text>
+                <Text style={styles.infoBannerText}>Aprueba o rechaza la solicitud. Si la apruebas, envias fecha, horario y comentario al administrador.</Text>
               </View>
             ) : null}
             <View style={styles.actionRow}>
@@ -450,7 +442,7 @@ export default function TallerDashboard() {
                   onPress={() => abrirFormularioCotizacion(item)}
                 >
                   <Text style={styles.primaryButtonText}>
-                    {isQuoteFormOpen ? "Ocultar formulario" : "Cotizar"}
+                    {isQuoteFormOpen ? "Ocultar formulario" : "Aprobar servicio"}
                   </Text>
                 </TouchableOpacity>
               ) : null}
@@ -482,17 +474,9 @@ export default function TallerDashboard() {
                       );
                     }}
                   >
-                    <Text style={styles.dangerButtonText}>Devolver</Text>
+                    <Text style={styles.dangerButtonText}>Rechazar servicio</Text>
                   </TouchableOpacity>
                 </View>
-              ) : null}
-              {options?.showDiagnosticSend ? (
-                <TouchableOpacity
-                  style={styles.primaryButton}
-                  onPress={() => actualizarEstadoSolicitud(id, "diagnosticada", "El diagnostico fue enviado al administrador.")}
-                >
-                  <Text style={styles.primaryButtonText}>Enviar diagnostico</Text>
-                </TouchableOpacity>
               ) : null}
               {options?.showStart ? (
                 <TouchableOpacity
@@ -519,50 +503,39 @@ export default function TallerDashboard() {
 
             {options?.showQuote && isQuoteFormOpen ? (
               <View style={styles.quoteFormCard}>
-                <Text style={styles.quoteFormTitle}>Cotizacion del taller</Text>
+                <Text style={styles.quoteFormTitle}>Aprobacion del taller</Text>
 
-                <Text style={styles.quoteFormLabel}>Diagnostico</Text>
+                <Text style={styles.quoteFormLabel}>Comentario</Text>
                 <TextInput
                   style={[styles.quoteInput, styles.quoteInputMultiline]}
-                  value={quoteForm.diagnostico}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "diagnostico", value)}
-                  placeholder="Describe el diagnostico realizado"
+                  value={quoteForm.comentario}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "comentario", value)}
+                  placeholder="Comentario para el administrador y el cliente"
                   placeholderTextColor="#94a3b8"
                   multiline
                 />
 
-                <Text style={styles.quoteFormLabel}>Servicios</Text>
-                <TextInput
-                  style={[styles.quoteInput, styles.quoteInputMultiline]}
-                  value={quoteForm.servicios}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "servicios", value)}
-                  placeholder="Servicios que se deben realizar"
-                  placeholderTextColor="#94a3b8"
-                  multiline
-                />
-
-                <Text style={styles.quoteFormLabel}>Horas</Text>
+                <Text style={styles.quoteFormLabel}>Fecha disponible</Text>
                 <TextInput
                   style={styles.quoteInput}
-                  value={quoteForm.horas}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "horas", value)}
-                  placeholder="02:30"
+                  value={quoteForm.fechaDisponible}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "fechaDisponible", value)}
+                  placeholder="2026-03-30"
                   placeholderTextColor="#94a3b8"
                 />
 
-                <Text style={styles.quoteFormLabel}>Materiales</Text>
+                <Text style={styles.quoteFormLabel}>Horario disponible</Text>
                 <TextInput
-                  style={[styles.quoteInput, styles.quoteInputMultiline]}
-                  value={quoteForm.materiales}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "materiales", value)}
-                  placeholder="Materiales y repuestos necesarios"
+                  style={styles.quoteInput}
+                  value={quoteForm.horarioDisponible}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "horarioDisponible", value)}
+                  placeholder="8:00 a. m. a 11:00 a. m."
                   placeholderTextColor="#94a3b8"
-                  multiline
                 />
 
                 <TouchableOpacity
                   style={styles.primaryButton}
-                  onPress={() => enviarCotizacionTaller(item)}
+                  onPress={() => aprobarSolicitudTaller(item)}
                 >
                   <Text style={styles.primaryButtonText}>Enviar al admin</Text>
                 </TouchableOpacity>
@@ -615,7 +588,7 @@ export default function TallerDashboard() {
       return (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Solicitudes recibidas</Text>
-          <Text style={styles.panelSubtitle}>Aqui llegan las solicitudes enviadas por el administrador. Desde aqui puedes cotizar y devolver el diagnostico.</Text>
+          <Text style={styles.panelSubtitle}>Aqui llegan las solicitudes enviadas por el administrador. Desde aqui puedes aprobar el servicio con fecha y horario o rechazarlo.</Text>
           {requestsReceived.length > 0 ? requestsReceived.map((item) => renderRequestCard(item, { showQuote: true, showReturn: true, showInfo: true })) : <Text style={styles.emptyText}>No hay solicitudes nuevas en este momento.</Text>}
         </View>
       );
@@ -624,9 +597,9 @@ export default function TallerDashboard() {
     if (selectedSection === "Diagnostico") {
       return (
         <View style={styles.panel}>
-          <Text style={styles.panelTitle}>Diagnostico</Text>
-          <Text style={styles.panelSubtitle}>Aqui se ven las solicitudes ya diagnosticadas y pendientes de revision del administrador.</Text>
-          {waitingAdminRequests.length > 0 ? waitingAdminRequests.map((item) => renderRequestCard(item, { showInfo: true })) : <Text style={styles.emptyText}>No hay diagnosticos enviados al administrador.</Text>}
+          <Text style={styles.panelTitle}>Pendientes de administrador</Text>
+          <Text style={styles.panelSubtitle}>Aqui ves las solicitudes aprobadas por el taller y pendientes de que el administrador envie la informacion al cliente.</Text>
+          {waitingAdminRequests.length > 0 ? waitingAdminRequests.map((item) => renderRequestCard(item, { showInfo: true })) : <Text style={styles.emptyText}>No hay respuestas pendientes para el administrador.</Text>}
         </View>
       );
     }

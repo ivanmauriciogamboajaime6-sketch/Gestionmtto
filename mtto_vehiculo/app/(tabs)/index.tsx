@@ -53,6 +53,8 @@ type Solicitud = {
   tipo_servicio?: string;
   problema?: string;
   estado?: string;
+  observacion?: string | null;
+  disponibilidad_cliente?: string | null;
   fecha?: string | null;
   vehiculo?: {
     id?: number | string;
@@ -78,6 +80,11 @@ type Solicitud = {
       precio?: string | null;
       observacion?: string | null;
     }[];
+  };
+  respuesta_taller?: {
+    comentario?: string | null;
+    fecha_disponible?: string | null;
+    horario_disponible?: string | null;
   };
 };
 
@@ -557,6 +564,7 @@ export default function Dashboard() {
           vehiculo_id: Number(vehicle.id),
           tipo: serviceTitle.replace("\n", " "),
           descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
+          disponibilidad_cliente: "Por coordinar con el cliente",
         }),
       });
 
@@ -770,6 +778,14 @@ export default function Dashboard() {
     const normalizado = normalizeStatus(estado);
     let label = getStatusLabel(normalizado);
 
+    if (normalizado === "en_asignacion_taller") {
+      label = "En asignacion de taller";
+    }
+
+    if (normalizado === "pendiente_envio_cliente_taller") {
+      label = "Coordinando visita al taller";
+    }
+
     if (isQuotedStatus(normalizado)) {
       label = "En cotizacion";
     }
@@ -919,8 +935,10 @@ export default function Dashboard() {
     "Todos",
     "Creada",
     "En revision",
+    "En asignacion de taller",
     "En diagnostico",
     "Diagnosticada",
+    "Coordinando visita al taller",
     "En cotizacion",
     "Cotizada",
     "Propuesta armada",
@@ -1012,6 +1030,9 @@ export default function Dashboard() {
                   <Text style={styles.serviceRequestDescription}>
                     {item.problema || "Solicitud enviada al administrador para revision."}
                   </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Disponibilidad registrada: {item.disponibilidad_cliente || "Sin registrar"}
+                  </Text>
                   <Text style={styles.serviceRequestMeta}>Orden #{item.id}</Text>
                 </>
               ) : null}
@@ -1070,6 +1091,21 @@ export default function Dashboard() {
                       No hay talleres disponibles registrados.
                     </Text>
                   )}
+                </View>
+              ) : null}
+
+              {expanded && item.respuesta_taller?.fecha_disponible ? (
+                <View style={styles.clientQuoteCard}>
+                  <Text style={styles.clientQuoteTitle}>Informacion para acercarte al taller</Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Fecha disponible: {item.respuesta_taller.fecha_disponible || "Sin fecha"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Horario disponible: {item.respuesta_taller.horario_disponible || "Sin horario"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Comentario del taller: {item.respuesta_taller.comentario || item.observacion || "Sin comentario"}
+                  </Text>
                 </View>
               ) : null}
             </TouchableOpacity>

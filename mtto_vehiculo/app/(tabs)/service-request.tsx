@@ -31,6 +31,7 @@ type Solicitud = {
   id?: number | string;
   tipo_servicio?: string;
   estado?: string;
+  disponibilidad_cliente?: string;
   vehiculo?: {
     id?: number | string;
   };
@@ -150,6 +151,7 @@ export default function ServiceRequestScreen() {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(params.vehicleId ?? null);
   const [selectedServices, setSelectedServices] = useState<string[]>(["Cambio de aceite de motor y filtro"]);
   const [descripcion, setDescripcion] = useState("");
+  const [disponibilidadCliente, setDisponibilidadCliente] = useState("");
   const [kilometraje, setKilometraje] = useState(params.mileage ?? "");
   const [fechaRequerida] = useState(getToday());
   const [sending, setSending] = useState(false);
@@ -336,8 +338,18 @@ export default function ServiceRequestScreen() {
       return;
     }
 
+    if (!disponibilidadCliente.trim()) {
+      Alert.alert("Error", "Debes indicar tu disponibilidad para acercarte al taller");
+      return;
+    }
+
     if (descripcion.trim().length > 200) {
       Alert.alert("Error", "La descripcion no puede superar los 200 caracteres");
+      return;
+    }
+
+    if (disponibilidadCliente.trim().length > 200) {
+      Alert.alert("Error", "La disponibilidad no puede superar los 200 caracteres");
       return;
     }
 
@@ -360,6 +372,7 @@ export default function ServiceRequestScreen() {
           vehiculo_id: Number(selectedVehicle.id),
           tipo: selectedServices.join(", "),
           descripcion: descripcion.trim(),
+          disponibilidad_cliente: disponibilidadCliente.trim(),
         }),
       });
 
@@ -544,6 +557,19 @@ export default function ServiceRequestScreen() {
         />
         <Text style={styles.counterText}>{descripcion.length}/200</Text>
 
+        <Text style={styles.inputLabel}>Disponibilidad para acercarte al taller</Text>
+        <TextInput
+          style={[styles.input, styles.textArea]}
+          multiline
+          numberOfLines={3}
+          value={disponibilidadCliente}
+          onChangeText={setDisponibilidadCliente}
+          placeholder="Ejemplo: Lunes a viernes despues de las 3:00 p. m. o sabado en la manana"
+          placeholderTextColor="#94a3b8"
+          maxLength={200}
+        />
+        <Text style={styles.counterText}>{disponibilidadCliente.length}/200</Text>
+
         <View style={styles.doubleRow}>
           <View style={styles.flexItem}>
             <Text style={styles.inputLabel}>Kilometraje actual</Text>
@@ -582,6 +608,9 @@ export default function ServiceRequestScreen() {
         </Text>
         <Text style={styles.summaryText}>Servicios: {selectedServices.join(", ") || "Sin seleccionar"}</Text>
         <Text style={styles.summaryText}>Kilometraje: {formatKilometraje(kilometraje)}</Text>
+        <Text style={styles.summaryText}>
+          Disponibilidad: {disponibilidadCliente.trim() || "Sin registrar"}
+        </Text>
         <Text style={styles.summaryText}>Administrador: revision y cotizacion</Text>
         {solicitudActiva ? (
           <Text style={styles.warningText}>
