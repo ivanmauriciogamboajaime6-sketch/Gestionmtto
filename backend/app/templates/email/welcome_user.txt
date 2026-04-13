@@ -1,0 +1,10 @@
+Hola $nombre,
+
+Tu cuenta fue creada correctamente en MTTO Vehicular.
+
+Rol asignado: $rol
+Correo registrado: $email
+
+Ya puedes ingresar a la plataforma y continuar con tu proceso.
+
+Equipo MTTO Vehicular

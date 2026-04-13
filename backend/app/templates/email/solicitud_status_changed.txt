@@ -1,0 +1,11 @@
+Hola $nombre,
+
+La solicitud #$solicitud_id tuvo un cambio de estado.
+
+Estado anterior: $estado_anterior
+Estado actual: $estado_actual
+Gestionado por: $actor
+
+Tipo de servicio: $tipo_servicio
+
+Equipo MTTO Vehicular
