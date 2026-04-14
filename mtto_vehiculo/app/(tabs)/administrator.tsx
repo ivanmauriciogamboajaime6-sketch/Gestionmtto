@@ -6,6 +6,7 @@ import { useRouter } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
 import { formatCurrency, formatDateTime } from "../../constants/formatters";
 import {
+  getStatusTone,
   isApprovedStatus,
   getStatusLabel,
   isCancelledStatus,
@@ -79,6 +80,9 @@ type Solicitud = {
       disponibilidad?: string | null;
       precio?: string | null;
       observacion?: string | null;
+      documento_excel_nombre?: string | null;
+      documento_excel_mime?: string | null;
+      documento_excel_base64?: string | null;
     }[];
   };
   taller_diagnostico?: {
@@ -86,6 +90,14 @@ type Solicitud = {
     servicios?: string | null;
     horas?: string | null;
     materiales?: string | null;
+  };
+  flujo_mantenimiento?: {
+    repuestos_solicitados?: {
+      nombre?: string | null;
+      cantidad?: number | null;
+    }[];
+    timeline?: Record<string, string | null>;
+    confirmaciones?: Record<string, boolean | string | null>;
   };
   respuesta_taller?: {
     comentario?: string | null;
@@ -107,6 +119,29 @@ type DirectoryItem = {
   especialidad?: string | null;
 };
 
+type CotizacionRespuesta = {
+  solicitudId: number | string | null;
+  estado: string | null;
+  proveedorId: number | string | null;
+  proveedorNombre: string;
+  responseIndex: number;
+  marca: string;
+  referencia: string;
+  garantia: string;
+  disponibilidad: string;
+  precio: string;
+  observacion: string;
+  documentoExcelNombre: string | null;
+};
+
+type CotizacionProveedorGrupo = {
+  proveedorId: number | string | null;
+  proveedorNombre: string;
+  estado: string | null;
+  documentoExcelNombre: string | null;
+  respuestas: CotizacionRespuesta[];
+};
+
 const normalizeProviderSpecialties = (especialidad?: string | null) =>
   (especialidad || "")
     .split(",")
@@ -115,6 +150,31 @@ const normalizeProviderSpecialties = (especialidad?: string | null) =>
     .map((item) => (item === "aceite" ? "cambio de aceite" : item));
 
 const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.solicitud_origen_id ?? item.id;
+
+const formatWorkshopDateLabel = (value?: string | null) => {
+  if (!value) return "Sin fecha";
+  const [year, month, day] = String(value).split("-").map(Number);
+  if (!year || !month || !day) return String(value);
+  const date = new Date(year, month - 1, day);
+  return date.toLocaleDateString("es-CO", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+const formatWorkshopTimeLabel = (value?: string | null) => {
+  if (!value) return "Sin horario";
+  const [hours, minutes] = String(value).split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return String(value);
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date.toLocaleTimeString("es-CO", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
 
 const getTrackingPriority = (item: Solicitud) => {
   const status = normalizeStatus(item.estado);
@@ -125,7 +185,7 @@ const getTrackingPriority = (item: Solicitud) => {
   if (isSentToClientStatus(status)) return 550;
   if (isProposalReadyStatus(status)) return 500;
   if (isQuotedStatus(status)) return 450;
-  if (normalizeStatus(status) === "pendiente_envio_cliente_taller") return 400;
+  if (normalizeStatus(status) === "pendiente_envio_cliente_taller" || isWaitingClientStatus(status)) return 400;
   if (isDiagnosedStatus(status)) return 350;
   if (isInDiagnosisStatus(status)) return 300;
   if (normalizeStatus(status) === "en_asignacion_taller") return 250;
@@ -155,20 +215,7 @@ const buildUnifiedTrackingRequests = (items: Solicitud[]) => {
           return Number(b.id || 0) - Number(a.id || 0);
         })[0] || root;
 
-      const selectedStatus = normalizeStatus(selected.estado);
-      const onlySelectedResponseStatuses = new Set([
-        "aprobada",
-        "espera_cliente",
-        "en_reparacion",
-        "en_proceso",
-        "finalizada",
-        "finalizado",
-        "rechazada_proveedor",
-        "devuelto_proveedor",
-      ]);
-      const responseSourceItems = onlySelectedResponseStatuses.has(selectedStatus)
-        ? [selected]
-        : sortedGroup;
+      const responseSourceItems = sortedGroup;
 
       const responsesFromGroup = responseSourceItems.flatMap((item) =>
         (item.cotizacion?.respuestas || []).map((respuesta) => ({
@@ -186,6 +233,9 @@ const buildUnifiedTrackingRequests = (items: Solicitud[]) => {
           disponibilidad: respuesta.disponibilidad || item.cotizacion?.disponibilidad || null,
           precio: respuesta.precio || item.cotizacion?.precio || null,
           observacion: respuesta.observacion || item.cotizacion?.observacion || null,
+          documento_excel_nombre: respuesta.documento_excel_nombre || null,
+          documento_excel_mime: respuesta.documento_excel_mime || null,
+          documento_excel_base64: respuesta.documento_excel_base64 || null,
         }))
       );
 
@@ -219,6 +269,8 @@ const buildUnifiedTrackingRequests = (items: Solicitud[]) => {
         accion_solicitud_id: root.id,
         respuesta_taller: selected.respuesta_taller || root.respuesta_taller,
         respuesta_proveedor: selected.respuesta_proveedor || root.respuesta_proveedor,
+        taller_diagnostico: selected.taller_diagnostico || root.taller_diagnostico,
+        flujo_mantenimiento: selected.flujo_mantenimiento || root.flujo_mantenimiento,
         cotizacion: {
           ...(root.cotizacion || {}),
           ...(selected.cotizacion || {}),
@@ -287,7 +339,7 @@ const orderStatusFilters = [
   "En asignacion taller",
   "En diagnostico",
   "Diagnosticada",
-  "Pendiente envio cliente",
+  "Esperando cliente",
   "En cotizacion",
   "Cotizada",
   "Enviada al cliente",
@@ -508,7 +560,6 @@ export default function AdministratorDashboardScreen() {
     const value = (tipoServicio || "").toLowerCase().trim();
 
     return (
-      !esSolicitudParaCotizar(tipoServicio) &&
       (value.includes(":") ||
         value.includes(",") ||
         value.includes("mantenimiento") ||
@@ -516,7 +567,34 @@ export default function AdministratorDashboardScreen() {
         value.includes("escaneo") ||
         value.includes("motor") ||
         value.includes("suspension") ||
-        value.includes("alineacion"))
+        value.includes("direccion") ||
+        value.includes("alineacion") ||
+        value.includes("balanceo") ||
+        value.includes("neumatic") ||
+        value.includes("revision") ||
+        value.includes("chequeo") ||
+        value.includes("enfriamiento") ||
+        value.includes("afinacion") ||
+        value.includes("electrico") ||
+        value.includes("bujia") ||
+        value.includes("cadena") ||
+        value.includes("arrastre") ||
+        value.includes("frenos") ||
+        value.includes("freno") ||
+        value.includes("pastillas") ||
+        value.includes("balatas") ||
+        value.includes("transmision") ||
+        value.includes("valvulas") ||
+        value.includes("carburador") ||
+        value.includes("inyectores") ||
+        value.includes("barras") ||
+        value.includes("retenes") ||
+        value.includes("mecanica general") ||
+        value.includes("rodamientos") ||
+        value.includes("rulemanes") ||
+        value.includes("tablero") ||
+        value.includes("niveles") ||
+        value.includes("presion de neumaticos"))
     );
   };
 
@@ -825,7 +903,8 @@ export default function AdministratorDashboardScreen() {
             normalizeStatus(item.estado) === "en_asignacion_taller" ||
             isInDiagnosisStatus(item.estado) ||
             isDiagnosedStatus(item.estado) ||
-            normalizeStatus(item.estado) === "pendiente_envio_cliente_taller"
+            normalizeStatus(item.estado) === "pendiente_envio_cliente_taller" ||
+            isWaitingClientStatus(item.estado)
           ),
         },
         {
@@ -921,9 +1000,9 @@ export default function AdministratorDashboardScreen() {
       };
     }
 
-    if (normalizeStatus(estado) === "pendiente_envio_cliente_taller") {
+    if (normalizeStatus(estado) === "pendiente_envio_cliente_taller" || isWaitingClientStatus(estado)) {
       return {
-        label: "Pendiente de enviar al cliente",
+        label: "Esperando confirmacion del cliente",
         pillStyle: styles.requestStatusPillSuccess,
         textStyle: styles.requestStatusTextSuccess,
       };
@@ -931,7 +1010,7 @@ export default function AdministratorDashboardScreen() {
 
     if (isInDiagnosisStatus(estado)) {
       return {
-        label: "En espera del taller",
+        label: "En diagnostico",
         pillStyle: styles.requestStatusPill,
         textStyle: styles.requestStatusText,
       };
@@ -953,6 +1032,14 @@ export default function AdministratorDashboardScreen() {
       };
     }
 
+    if (["aprobada", "intervencion_iniciada", "repuestos_despachados", "repuestos_recibidos_taller", "en_reparacion", "finalizada"].includes(normalizeStatus(estado))) {
+      return {
+        label: getStatusLabel(estado),
+        pillStyle: styles.requestStatusPillSuccess,
+        textStyle: styles.requestStatusTextSuccess,
+      };
+    }
+
     return {
       label: getStatusLabel(estado),
       pillStyle: styles.requestStatusPill,
@@ -966,7 +1053,7 @@ export default function AdministratorDashboardScreen() {
       .map((item) => item.trim())
       .filter(Boolean);
 
-  const obtenerRespuestasCotizacion = (solicitud: Solicitud) => {
+  const obtenerRespuestasCotizacion = (solicitud: Solicitud): CotizacionRespuesta[] => {
     if (solicitud.cotizacion?.respuestas && solicitud.cotizacion.respuestas.length > 0) {
       return solicitud.cotizacion.respuestas.map((respuesta) => ({
         solicitudId: respuesta.solicitud_id || null,
@@ -980,6 +1067,7 @@ export default function AdministratorDashboardScreen() {
         disponibilidad: respuesta.disponibilidad || "Sin disponibilidad",
         precio: respuesta.precio || "0",
         observacion: respuesta.observacion || "Sin observacion",
+        documentoExcelNombre: respuesta.documento_excel_nombre || null,
       }));
     }
 
@@ -1011,6 +1099,7 @@ export default function AdministratorDashboardScreen() {
       disponibilidad: disponibilidades[index] || "Sin disponibilidad",
       precio: precios[index] || "0",
       observacion: observaciones[index] || "Sin observacion",
+      documentoExcelNombre: null,
     }));
   };
 
@@ -1032,6 +1121,64 @@ export default function AdministratorDashboardScreen() {
     }
 
     return respuestas.slice(0, 1);
+  };
+
+  const agruparRespuestasPorProveedor = (
+    respuestas: CotizacionRespuesta[]
+  ): CotizacionProveedorGrupo[] => {
+    const grouped = new Map<string, CotizacionProveedorGrupo>();
+
+    respuestas.forEach((respuesta, index) => {
+      const key = String(respuesta.proveedorId ?? `sin-proveedor-${index}`);
+      const current = grouped.get(key);
+
+      if (current) {
+        current.respuestas.push(respuesta);
+        if (!current.documentoExcelNombre && respuesta.documentoExcelNombre) {
+          current.documentoExcelNombre = respuesta.documentoExcelNombre;
+        }
+        return;
+      }
+
+      grouped.set(key, {
+        proveedorId: respuesta.proveedorId,
+        proveedorNombre: respuesta.proveedorNombre || `Proveedor ${index + 1}`,
+        estado: respuesta.estado,
+        documentoExcelNombre: respuesta.documentoExcelNombre,
+        respuestas: [respuesta],
+      });
+    });
+
+    return Array.from(grouped.values());
+  };
+
+  const parseCurrencyValue = (value?: string | null) => {
+    const normalized = String(value || "")
+      .replace(/[^\d,.-]/g, "")
+      .replace(/\.(?=\d{3}(?:\D|$))/g, "")
+      .replace(",", ".");
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const parseHoursValue = (value?: string | null) => {
+    const normalized = String(value || "")
+      .replace(/[^\d,.-]/g, "")
+      .replace(",", ".");
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const calcularTotalCotizacionProveedor = (
+    grupo: CotizacionProveedorGrupo,
+    solicitud: Solicitud
+  ) => {
+    const totalRepuestos = grupo.respuestas.reduce(
+      (sum, respuesta) => sum + parseCurrencyValue(respuesta.precio),
+      0
+    );
+    const horas = parseHoursValue(solicitud.taller_diagnostico?.horas);
+    return totalRepuestos + horas * 100000;
   };
 
   const sideMenuWithBadges: Array<{ label: string; icon: string; active: boolean; badge?: number }> = useMemo(
@@ -1303,8 +1450,8 @@ export default function AdministratorDashboardScreen() {
       if (selectedOrderFilter === "Diagnosticada") {
         return isDiagnosedStatus(status);
       }
-      if (selectedOrderFilter === "Pendiente envio cliente") {
-        return status === "pendiente_envio_cliente_taller";
+      if (selectedOrderFilter === "Esperando cliente") {
+        return status === "pendiente_envio_cliente_taller" || isWaitingClientStatus(status);
       }
       if (selectedOrderFilter === "En cotizacion") return isInQuotationStatus(status);
       if (selectedOrderFilter === "Cotizada") return isQuotedStatus(status);
@@ -1342,6 +1489,99 @@ export default function AdministratorDashboardScreen() {
         }))
         .filter((group) => group.items.length > 0),
     [groupedQuoteRequests, matchesOrderFilter]
+  );
+
+
+  const orderOverviewCards = useMemo(
+    () => [
+      {
+        id: "total",
+        label: "Total solicitudes",
+        value: solicitudes.length,
+        note: `+ ${filteredPendingRequests.length} por revisar`,
+        icon: "clipboard-text-outline",
+        tone: "#2563eb",
+        soft: "#eaf2ff",
+      },
+      {
+        id: "progress",
+        label: "En proceso",
+        value: solicitudes.filter((item) => isInProcessStatus(item.estado) || isApprovedStatus(item.estado)).length,
+        note: "Seguimiento activo",
+        icon: "progress-clock",
+        tone: "#f59e0b",
+        soft: "#fff5de",
+      },
+      {
+        id: "completed",
+        label: "Completadas",
+        value: solicitudes.filter((item) => isFinishedStatus(item.estado)).length,
+        note: "Cerradas con exito",
+        icon: "check-decagram-outline",
+        tone: "#16a34a",
+        soft: "#eaf8ef",
+      },
+      {
+        id: "pending",
+        label: "Pendientes",
+        value: pendingRequests.length,
+        note: "Atencion requerida",
+        icon: "alert-circle-outline",
+        tone: "#ef4444",
+        soft: "#ffeded",
+      },
+    ],
+    [filteredPendingRequests.length, pendingRequests.length, solicitudes]
+  );
+
+  const orderStatusChart = useMemo(() => {
+    const items = [
+      {
+        id: "nuevas",
+        label: "Nuevas",
+        value: solicitudes.filter((item) => {
+          const status = normalizeStatus(item.estado);
+          return status === "pendiente" || isCreatedStatus(status) || status === "en_revision";
+        }).length,
+        color: "#2563eb",
+      },
+      {
+        id: "proceso",
+        label: "En proceso",
+        value: solicitudes.filter((item) => isInProcessStatus(item.estado) || isApprovedStatus(item.estado)).length,
+        color: "#fbbf24",
+      },
+      {
+        id: "cotizacion",
+        label: "Cotizacion",
+        value: solicitudes.filter((item) => isInQuotationStatus(item.estado) || isQuotedStatus(item.estado)).length,
+        color: "#7c6cf3",
+      },
+      {
+        id: "cliente",
+        label: "Cliente",
+        value: solicitudes.filter((item) => isSentToClientStatus(item.estado) || isWaitingClientStatus(item.estado)).length,
+        color: "#34c38f",
+      },
+      {
+        id: "finalizadas",
+        label: "Finalizadas",
+        value: solicitudes.filter((item) => isFinishedStatus(item.estado)).length,
+        color: "#9ca3af",
+      },
+    ];
+
+    const maxValue = Math.max(...items.map((item) => item.value), 1);
+
+    return items.map((item) => ({
+      ...item,
+      height: Math.max(18, (item.value / maxValue) * 92),
+    }));
+  }, [solicitudes]);
+
+  const orderRecentRequests = useMemo(
+    () => filteredPendingRequests.slice(0, 3),
+    [filteredPendingRequests]
   );
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -1468,6 +1708,43 @@ export default function AdministratorDashboardScreen() {
 
           {selectedSection === "Vista general" && (
             <>
+              <View style={styles.hiddenPanel}>
+                {orderOverviewCards.map((item) => (
+                  <View key={item.id} style={[styles.orderSummaryCard, isMobile && styles.orderSummaryCardMobile]}>
+                    <View style={styles.orderSummaryTopRow}>
+                      <View>
+                        <Text style={styles.orderSummaryLabel}>{item.label}</Text>
+                        <Text style={styles.orderSummaryValue}>{item.value}</Text>
+                        <Text style={styles.orderSummaryNote}>{item.note}</Text>
+                      </View>
+                      <View style={[styles.orderSummaryIconWrap, { backgroundColor: item.soft }]}>
+                        <MaterialCommunityIcons name={item.icon as any} size={20} color={item.tone} />
+                      </View>
+                    </View>
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.hiddenPanel}>
+                <View style={styles.orderCardHeader}>
+                  <Text style={styles.orderCardTitle}>Solicitudes por estado</Text>
+                  <View style={styles.orderHeroPill}>
+                    <Text style={styles.orderHeroPillText}>Esta semana</Text>
+                    <MaterialCommunityIcons name="chevron-down" size={16} color="#475569" />
+                  </View>
+                </View>
+                <View style={styles.orderMiniChart}>
+                  {orderStatusChart.map((item) => (
+                    <View key={item.id} style={styles.orderMiniChartItem}>
+                      <View style={styles.orderMiniChartTrack}>
+                        <View style={[styles.orderMiniChartBar, { height: item.height, backgroundColor: item.color }]} />
+                      </View>
+                      <Text style={styles.orderMiniChartLabel} numberOfLines={1}>{item.label}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+
               <View style={styles.kpiGrid}>
                 {dashboardKpis.map((item) => (
                   <View key={item.label} style={[styles.kpiCard, isMobile && styles.kpiCardMobile]}>
@@ -1563,44 +1840,93 @@ export default function AdministratorDashboardScreen() {
           )}
 
           {selectedSection === "Ordenes" && (
-            <View style={styles.panelFull}>
-            <View style={styles.panelMedium}>
-              <Text style={styles.panelTitle}>Filtros ordenes</Text>
-              <View style={styles.filterWrap}>
-                {orderStatusFilters.map((filter) => (
-                  <TouchableOpacity
-                    key={filter}
-                    style={[
-                      styles.filterChip,
-                      selectedOrderFilter === filter && styles.filterChipActive,
-                    ]}
-                    onPress={() => setSelectedOrderFilter(filter)}
-                  >
-                    <Text
-                      style={[
-                        styles.filterChipText,
-                        selectedOrderFilter === filter && styles.filterChipTextActive,
-                      ]}
-                    >
-                      {filter}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+            <View style={styles.orderPanelFull}>
+              <View style={styles.orderHeroCard}>
+                <View style={styles.orderHeroText}>
+                  <Text style={styles.orderHeroTitle}>Administrador</Text>
+                  <Text style={styles.orderHeroSubtitle}>Panel de control</Text>
+                </View>
+                <View style={styles.orderHeroActions}>
+                  {loadingSolicitudes ? <Text style={styles.panelMeta}>Actualizando...</Text> : null}
+                  <View style={styles.orderHeroPill}>
+                    <Text style={styles.orderHeroPillText}>Hoy</Text>
+                    <MaterialCommunityIcons name="chevron-down" size={16} color="#475569" />
+                  </View>
+                </View>
               </View>
-            </View>
 
-            <View style={styles.panelHeader}>
-              <Text style={styles.panelTitle}>Modulo: Ordenes</Text>
-              {loadingSolicitudes ? <Text style={styles.panelMeta}>Actualizando...</Text> : null}
-            </View>
+              <View style={styles.orderFilterCard}>
+                <View style={styles.orderCardHeader}>
+                  <Text style={styles.orderCardTitle}>Solicitudes</Text>
+                  <TouchableOpacity style={styles.filterActionButton} activeOpacity={0.9}>
+                    <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+                  </TouchableOpacity>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.orderFilterWrap}>
+                  {orderStatusFilters.map((filter) => (
+                    <TouchableOpacity
+                      key={filter}
+                      style={[
+                        styles.filterChip,
+                        selectedOrderFilter === filter && styles.filterChipActive,
+                      ]}
+                      onPress={() => setSelectedOrderFilter(filter)}
+                    >
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          selectedOrderFilter === filter && styles.filterChipTextActive,
+                        ]}
+                      >
+                        {filter}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
 
-            <View style={styles.notificationPanel}>
+              <View style={styles.hiddenPanel}>
+                <View style={styles.orderCardHeader}>
+                  <Text style={styles.orderCardTitle}>Solicitudes recientes</Text>
+                  <Text style={styles.orderCardLink}>Ver todo</Text>
+                </View>
+                {orderRecentRequests.length > 0 ? (
+                  orderRecentRequests.map((item) => (
+                    <View key={`recent-${item.id}`} style={styles.orderCompactCard}>
+                      <View style={styles.orderCompactRow}>
+                        <View style={styles.orderCompactIcon}>
+                          <MaterialCommunityIcons name="file-document-outline" size={18} color="#2563eb" />
+                        </View>
+                        <View style={styles.orderCompactBody}>
+                          <View style={styles.orderCompactHeader}>
+                            <Text style={styles.orderCompactTitle}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
+                            <View style={styles.orderCompactStatusPill}>
+                              <Text style={styles.orderCompactStatusText}>{getStatusLabel(item.estado)}</Text>
+                            </View>
+                          </View>
+                          <Text style={styles.orderCompactMeta}>
+                            {`${item.cliente?.nombre || "Cliente"} • ${item.vehiculo?.placa || "Sin placa"}`}
+                          </Text>
+                          <Text style={styles.orderCompactMeta}>{formatDateTime(item.fecha)}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <View style={styles.emptyNotice}>
+                    <MaterialCommunityIcons name="bell-check-outline" size={24} color="#9eff6f" />
+                    <Text style={styles.emptyNoticeText}>
+                      No hay solicitudes nuevas para el estado seleccionado.
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.notificationPanel}>
               <View style={styles.notificationHeader}>
                 <View>
-                  <Text style={styles.notificationTitle}>Nuevas solicitudes</Text>
-                  <Text style={styles.notificationSubtitle}>
-                    Las solicitudes pendientes llegan aqui para el administrador.
-                  </Text>
+                  <Text style={styles.notificationTitle}>Solicitudes</Text>
+                  
                 </View>
               </View>
 
@@ -1609,6 +1935,7 @@ export default function AdministratorDashboardScreen() {
                   const especialidadSolicitud = obtenerEspecialidadSolicitud(item.tipo_servicio);
                   const esCotizacion = esSolicitudParaCotizar(item.tipo_servicio);
                   const esMantenimiento = esSolicitudMantenimientoTaller(item.tipo_servicio);
+                  const expandedPending = expandedQuoteResponseId === `pending-${item.id}`;
                   const proveedoresCompatibles = especialidadSolicitud
                     ? proveedores.filter(
                         (proveedor) => {
@@ -1627,30 +1954,53 @@ export default function AdministratorDashboardScreen() {
 
                   return (
                   <View key={`pending-${item.id}`} style={styles.requestCard}>
+                    <TouchableOpacity
+                      activeOpacity={0.92}
+                      onPress={() =>
+                        setExpandedQuoteResponseId((current) =>
+                          current === `pending-${item.id}` ? null : `pending-${item.id}`
+                        )
+                      }
+                    >
                     <View style={styles.requestHeader}>
                       <Text style={styles.requestId}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
-                      <View style={styles.requestStatusPill}>
-                        <Text style={styles.requestStatusText}>{getStatusLabel(item.estado)}</Text>
+                      <View style={[styles.requestStatusPill, { backgroundColor: getStatusTone(item.estado).backgroundColor, borderColor: getStatusTone(item.estado).borderColor }]}>
+                        <Text style={[styles.requestStatusText, { color: getStatusTone(item.estado).color }]}>{getStatusTone(item.estado).label}</Text>
                       </View>
                     </View>
-                    <Text style={styles.requestText}>Solicitud #{getCaseNumber(item)}</Text>
-                    <Text style={styles.requestText}>
-                      Cliente: {item.cliente?.nombre || "Cliente"}
+                    <Text style={styles.requestVehicleLine}>
+                      {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() || "Vehiculo"}
+                      {item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}
                     </Text>
-                    <Text style={styles.requestText}>
-                      Vehiculo:{" "}
-                      {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
-                        "Vehiculo"}
+                    <View style={styles.requestMetaList}>
+                      <View style={styles.requestMetaRow}>
+                        <MaterialCommunityIcons name="calendar-blank-outline" size={16} color="#6b7280" />
+                        <Text style={styles.requestText}>{formatDateTime(item.fecha)}</Text>
+                      </View>
+                      <View style={styles.requestMetaRow}>
+                        <MaterialCommunityIcons name="tools" size={16} color="#6b7280" />
+                        <Text style={styles.requestText}>Problema: {item.problema || "Sin descripcion"}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.quoteExpandHint}>
+                      {expandedPending ? "Toca la tarjeta para ocultar el detalle" : "Toca la tarjeta para ver el detalle"}
                     </Text>
-                    <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
-                    <Text style={styles.requestText}>
-                      Fecha y hora de recepcion: {formatDateTime(item.fecha)}
-                    </Text>
-                    <Text style={styles.requestText}>
-                      Problema: {item.problema || "Sin descripcion"}
-                    </Text>
+                    </TouchableOpacity>
 
-                    {esCotizacion ? (
+                    {expandedPending ? (
+                      <View style={styles.trackingExpandedBlock}>
+                        <Text style={styles.requestText}>Cliente: {item.cliente?.nombre || "Cliente"}</Text>
+                        <Text style={styles.requestText}>
+                          Vehiculo: {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() || "Vehiculo"}
+                        </Text>
+                        <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
+                        <Text style={styles.requestText}>Solicitud #{getCaseNumber(item)}</Text>
+                        <Text style={styles.requestText}>Fecha y hora de recepcion: {formatDateTime(item.fecha)}</Text>
+                        <Text style={styles.requestText}>Problema: {item.problema || "Sin descripcion"}</Text>
+                      </View>
+                    ) : null}
+
+                    {expandedPending && esCotizacion ? (
                       <>
                         <View style={styles.requestPrimaryActions}>
                           <TouchableOpacity
@@ -1760,7 +2110,7 @@ export default function AdministratorDashboardScreen() {
                           </View>
                         ) : null}
                       </>
-                    ) : (
+                    ) : expandedPending ? (
                       <>
                         <View style={styles.requestPrimaryActions}>
                           <TouchableOpacity
@@ -1831,7 +2181,7 @@ export default function AdministratorDashboardScreen() {
                           </View>
                         ) : null}
                       </>
-                    )}
+                    ) : null}
                   </View>
                   );
                 })
@@ -1843,9 +2193,9 @@ export default function AdministratorDashboardScreen() {
                   </Text>
                 </View>
               )}
-            </View>
+              </View>
 
-            <View style={styles.notificationPanel}>
+              <View style={styles.notificationPanel}>
               <View style={styles.notificationHeader}>
                 <View>
                   <Text style={styles.notificationTitle}>Seguimiento de solicitudes</Text>
@@ -1888,57 +2238,66 @@ export default function AdministratorDashboardScreen() {
                           </Text>
                         </View>
                       </View>
-                      <Text style={styles.requestText}>
-                        Cliente: {item.cliente?.nombre || "Cliente"}
+                      <Text style={styles.requestVehicleLine}>
+                        {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() || "Vehiculo"}
+                        {item.vehiculo?.placa ? ` - ${item.vehiculo.placa}` : ""}
                       </Text>
-                      <Text style={styles.requestText}>
-                        Vehiculo:{" "}
-                        {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
-                          "Vehiculo"}
-                      </Text>
-                      <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
-                      <Text style={styles.requestText}>Solicitud #{getCaseNumber(item)}</Text>
-                      <Text style={styles.requestText}>
-                        Fecha y hora de recepcion: {formatDateTime(item.fecha)}
-                      </Text>
-                      <Text style={styles.requestText}>
-                        Disponibilidad del cliente: {item.disponibilidad_cliente || "Sin registrar"}
-                      </Text>
-                      <Text style={styles.requestText}>
-                        Problema: {item.problema || "Sin descripcion"}
-                      </Text>
+                      <View style={styles.requestMetaList}>
+                        <View style={styles.requestMetaRow}>
+                          <MaterialCommunityIcons name="calendar-blank-outline" size={16} color="#6b7280" />
+                          <Text style={styles.requestText}>{formatDateTime(item.fecha)}</Text>
+                        </View>
+                        <View style={styles.requestMetaRow}>
+                          <MaterialCommunityIcons name="tools" size={16} color="#6b7280" />
+                          <Text style={styles.requestText}>Problema: {item.problema || "Sin descripcion"}</Text>
+                        </View>
+                      </View>
                       <Text style={styles.quoteExpandHint}>
-                        {expandedQuote ? "Toca para ocultar detalle" : "Toca la orden para ver detalle"}
+                        {expandedQuote ? "Toca la tarjeta para ocultar el detalle" : "Toca la tarjeta para ver el detalle"}
                       </Text>
                     </TouchableOpacity>
 
-                    {expandedQuote && normalizeStatus(item.estado) === "pendiente_envio_cliente_taller" ? (
+                    {expandedQuote ? (
+                      <View style={styles.trackingExpandedBlock}>
+                        <Text style={styles.requestText}>
+                          Cliente: {item.cliente?.nombre || "Cliente"}
+                        </Text>
+                        <Text style={styles.requestText}>Vehiculo: {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() || "Vehiculo"}</Text>
+                        <Text style={styles.requestText}>Placa: {item.vehiculo?.placa || "N/A"}</Text>
+                        <Text style={styles.requestText}>Solicitud #{getCaseNumber(item)}</Text>
+                        <Text style={styles.requestText}>
+                          Fecha y hora de recepcion: {formatDateTime(item.fecha)}
+                        </Text>
+                        <Text style={styles.requestText}>
+                          Disponibilidad del cliente: {item.disponibilidad_cliente || "Sin registrar"}
+                        </Text>
+                        <Text style={styles.requestText}>
+                          Problema: {item.problema || "Sin descripcion"}
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    {expandedQuote && (normalizeStatus(item.estado) === "pendiente_envio_cliente_taller" || isWaitingClientStatus(item.estado)) ? (
                       <View style={styles.providerSelectionCard}>
                         <View style={styles.quoteSummaryCard}>
-                          <Text style={styles.quoteSummaryTitle}>Respuesta aprobada del taller</Text>
+                          <Text style={styles.quoteSummaryTitle}>Disponibilidad confirmada por el taller</Text>
                           <Text style={styles.requestText}>
-                            Fecha disponible: {item.respuesta_taller?.fecha_disponible || "Sin fecha"}
+                            Fecha disponible: {formatWorkshopDateLabel(item.respuesta_taller?.fecha_disponible)}
                           </Text>
                           <Text style={styles.requestText}>
-                            Horario disponible: {item.respuesta_taller?.horario_disponible || "Sin horario"}
+                            Horario disponible: {formatWorkshopTimeLabel(item.respuesta_taller?.horario_disponible)}
                           </Text>
                           <Text style={styles.requestText}>
                             Comentario: {item.respuesta_taller?.comentario || "Sin comentario"}
                           </Text>
                         </View>
-
-                        <View style={styles.quoteDecisionRow}>
-                          <TouchableOpacity
-                            style={[styles.quoteDecisionButton, styles.quoteDecisionSendButton]}
-                            onPress={() => enviarCotizacionAlCliente(item.id)}
-                          >
-                            <Text style={styles.quoteDecisionSendText}>Enviar al cliente</Text>
-                          </TouchableOpacity>
-                        </View>
+                        <Text style={styles.requestText}>
+                          El cliente ya fue notificado y puede confirmar su llegada al taller desde la aplicacion. El administrador solo hace seguimiento en este punto.
+                        </Text>
                       </View>
                     ) : null}
 
-                    {expandedQuote && solicitudTaller && isDiagnosedStatus(item.estado) && normalizeStatus(item.estado) !== "pendiente_envio_cliente_taller" ? (
+                    {expandedQuote && solicitudTaller && isDiagnosedStatus(item.estado) && normalizeStatus(item.estado) !== "pendiente_envio_cliente_taller" && !isWaitingClientStatus(item.estado) ? (
                       <View style={styles.providerSelectionCard}>
                         {item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales ? (
                           <View style={styles.quoteSummaryCard}>
@@ -1950,10 +2309,20 @@ export default function AdministratorDashboardScreen() {
                           </View>
                         ) : null}
 
-                        <Text style={styles.providerSelectionTitle}>Definir siguiente paso</Text>
+                        <Text style={styles.providerSelectionTitle}>Enviar repuestos a proveedores</Text>
                         <Text style={styles.requestText}>
-                          El diagnostico ya fue recibido. Ahora puedes enviar materiales a proveedores o mandar la propuesta directo al cliente.
+                          El administrador ya recibio el diagnostico. En este flujo solo debes enviar los repuestos solicitados a proveedores para cotizacion.
                         </Text>
+                        <View style={styles.quoteSummaryCard}>
+                          <Text style={styles.quoteSummaryTitle}>Repuestos a cotizar</Text>
+                          <Text style={styles.requestText}>
+                            {item.flujo_mantenimiento?.repuestos_solicitados?.length
+                              ? item.flujo_mantenimiento.repuestos_solicitados
+                                  .map((repuesto) => `${repuesto.nombre || "Repuesto"} x${repuesto.cantidad || 0}`)
+                                  .join(", ")
+                              : "Sin repuestos registrados por el taller"}
+                          </Text>
+                        </View>
 
                         <View style={styles.requestPrimaryActions}>
                           <TouchableOpacity
@@ -1975,13 +2344,6 @@ export default function AdministratorDashboardScreen() {
                               size={18}
                               color="#2563eb"
                             />
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            style={styles.acceptButton}
-                            onPress={() => enviarCotizacionAlCliente(item.id)}
-                          >
-                            <Text style={styles.acceptButtonText}>Enviar directo al cliente</Text>
                           </TouchableOpacity>
                         </View>
 
@@ -2034,34 +2396,74 @@ export default function AdministratorDashboardScreen() {
                     ) : null}
 
                     {expandedQuote && respuestasCotizacion.length > 0 ? (
-                      respuestasCotizacion.map((respuesta, index) => (
-                        <View key={`respuesta-${item.id}-${index}`} style={styles.quoteSummaryCard}>
+                      <>
+                        <View style={styles.quoteSummaryCard}>
+                          <Text style={styles.quoteSummaryTitle}>Preparar propuesta para cliente</Text>
+                          <Text style={styles.requestText}>
+                            Revisa las cotizaciones recibidas y envia una sola propuesta por proveedor al cliente. Cada proveedor agrupa todos sus repuestos en un unico envio.
+                          </Text>
+                        </View>
+                      {agruparRespuestasPorProveedor(respuestasCotizacion).map((grupo, index) => (
+                        <View key={`respuesta-${item.id}-${grupo.proveedorId ?? index}`} style={styles.quoteSummaryCard}>
                           <Text style={styles.quoteSummaryTitle}>
-                            {respuesta.proveedorNombre || `Respuesta del proveedor ${index + 1}`}
+                            {grupo.proveedorNombre || `Respuesta del proveedor ${index + 1}`}
                           </Text>
-                          <Text style={styles.requestText}>Marca: {respuesta.marca}</Text>
-                          <Text style={styles.requestText}>Referencia: {respuesta.referencia}</Text>
-                          <Text style={styles.requestText}>Garantia: {respuesta.garantia}</Text>
-                          <Text style={styles.requestText}>
-                            Disponibilidad: {respuesta.disponibilidad}
-                          </Text>
-                          <Text style={styles.requestText}>Precio: {formatCurrency(respuesta.precio)}</Text>
-                          <Text style={styles.requestText}>
-                            Observacion: {respuesta.observacion}
+                          <Text style={styles.requestText}>Repuestos cotizados: {grupo.respuestas.length}</Text>
+                          {(item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales) ? (
+                            <View style={styles.quoteDiagnosticBlock}>
+                              <Text style={styles.quoteDiagnosticTitle}>Diagnostico del taller</Text>
+                              <Text style={styles.requestText}>
+                                Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Horas estimadas: {item.taller_diagnostico?.horas || "Sin horas"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Repuestos solicitados: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                              </Text>
+                            </View>
+                          ) : null}
+                          {grupo.respuestas.map((respuesta, respuestaIndex) => (
+                            <View
+                              key={`respuesta-detalle-${item.id}-${grupo.proveedorId ?? index}-${respuestaIndex}`}
+                              style={styles.quoteGroupItem}
+                            >
+                              <Text style={styles.requestText}>Marca: {respuesta.marca}</Text>
+                              <Text style={styles.requestText}>Referencia: {respuesta.referencia}</Text>
+                              <Text style={styles.requestText}>Garantia: {respuesta.garantia}</Text>
+                              <Text style={styles.requestText}>
+                                Disponibilidad: {respuesta.disponibilidad}
+                              </Text>
+                              <Text style={styles.requestText}>Precio: {formatCurrency(respuesta.precio)}</Text>
+                              <Text style={styles.requestText}>
+                                Observacion: {respuesta.observacion}
+                              </Text>
+                            </View>
+                          ))}
+                          {grupo.documentoExcelNombre ? (
+                            <Text style={styles.requestText}>
+                              Documento Excel: {grupo.documentoExcelNombre}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.quoteTotalText}>
+                            Valor total: {formatCurrency(calcularTotalCotizacionProveedor(grupo, item))}
                           </Text>
                           {(
                             (
-                              isQuotedStatus(respuesta.estado || item.estado) ||
-                              isInQuotationStatus(respuesta.estado || item.estado)
+                              isQuotedStatus(grupo.estado || item.estado) ||
+                              isInQuotationStatus(grupo.estado || item.estado)
                             ) &&
-                            !isSentToClientStatus(respuesta.estado || item.estado) &&
-                            !isApprovedStatus(respuesta.estado || item.estado)
+                            !isSentToClientStatus(grupo.estado || item.estado) &&
+                            !isApprovedStatus(grupo.estado || item.estado)
                           ) ? (
                             <View style={styles.quoteDecisionRow}>
                               <TouchableOpacity
                                 style={[styles.quoteDecisionButton, styles.quoteDecisionSendButton]}
                                 onPress={() =>
-                                  enviarCotizacionAlCliente(item.accion_solicitud_id || item.id, respuesta.proveedorId, respuesta.responseIndex)
+                                  enviarCotizacionAlCliente(item.accion_solicitud_id || item.id, grupo.proveedorId)
                                 }
                               >
                                 <Text style={styles.quoteDecisionSendText}>Enviar</Text>
@@ -2069,7 +2471,7 @@ export default function AdministratorDashboardScreen() {
                               <TouchableOpacity
                                 style={[styles.quoteDecisionButton, styles.quoteDecisionSkipButton]}
                                 onPress={() =>
-                                  omitirCotizacionCliente(item.accion_solicitud_id || item.id, respuesta.proveedorId, respuesta.responseIndex)
+                                  omitirCotizacionCliente(item.accion_solicitud_id || item.id, grupo.proveedorId)
                                 }
                               >
                                 <Text style={styles.quoteDecisionSkipText}>Omitir</Text>
@@ -2077,7 +2479,8 @@ export default function AdministratorDashboardScreen() {
                             </View>
                           ) : null}
                         </View>
-                      ))
+                      ))}
+                      </>
                     ) : null}
 
                     {expandedQuote &&
@@ -2095,14 +2498,55 @@ export default function AdministratorDashboardScreen() {
                       <View style={styles.quoteSummaryCard}>
                         <Text style={styles.quoteSummaryTitle}>Informacion para acercarse al taller</Text>
                         <Text style={styles.requestText}>
-                          Fecha disponible: {item.respuesta_taller.fecha_disponible || "Sin fecha"}
+                          Fecha disponible: {formatWorkshopDateLabel(item.respuesta_taller.fecha_disponible)}
                         </Text>
                         <Text style={styles.requestText}>
-                          Horario disponible: {item.respuesta_taller.horario_disponible || "Sin horario"}
+                          Horario disponible: {formatWorkshopTimeLabel(item.respuesta_taller.horario_disponible)}
                         </Text>
                         <Text style={styles.requestText}>
                           Comentario: {item.respuesta_taller.comentario || "Sin comentario"}
                         </Text>
+                      </View>
+                    ) : null}
+
+                    {expandedQuote && item.flujo_mantenimiento ? (
+                      <View style={styles.interventionTimelineCard}>
+                        <Text style={styles.interventionTimelineTitle}>Seguimiento de la intervencion</Text>
+                        <Text style={styles.requestText}>
+                          Repuestos solicitados: {item.taller_diagnostico?.materiales || "Sin repuestos"}
+                        </Text>
+                        {[
+                          {
+                            label: "Proveedor despacho repuestos",
+                            completed: Boolean(item.flujo_mantenimiento.confirmaciones?.proveedor_despacho_confirmado),
+                          },
+                          {
+                            label: "Taller inicio intervencion",
+                            completed: Boolean(item.flujo_mantenimiento.confirmaciones?.taller_inicio_intervencion_confirmado),
+                          },
+                          {
+                            label: "Taller recibio repuestos",
+                            completed: Boolean(item.flujo_mantenimiento.confirmaciones?.taller_recibe_repuestos_confirmado),
+                          },
+                          {
+                            label: "Reparacion final",
+                            completed: Boolean(item.flujo_mantenimiento.confirmaciones?.taller_reparacion_finalizada),
+                          },
+                        ].map((step) => (
+                          <View key={`${item.id}-${step.label}`} style={styles.timelineStep}>
+                            <View style={[styles.timelineIcon, step.completed && styles.timelineIconCompleted]}>
+                              <MaterialCommunityIcons
+                                name={step.completed ? "check" : "clock-outline"}
+                                size={14}
+                                color={step.completed ? "#1d4ed8" : "#64748b"}
+                              />
+                            </View>
+                            <View style={styles.timelineTextGroup}>
+                              <Text style={styles.timelineLabel}>{step.label}</Text>
+                              <Text style={styles.timelineState}>{step.completed ? "Confirmado" : "Pendiente"}</Text>
+                            </View>
+                          </View>
+                        ))}
                       </View>
                     ) : null}
 
@@ -2172,9 +2616,9 @@ export default function AdministratorDashboardScreen() {
                   </Text>
                 </View>
               )}
-            </View>
+              </View>
 
-          </View>
+            </View>
           )}
 
           {selectedSection === "Historial" && (
@@ -2217,19 +2661,52 @@ export default function AdministratorDashboardScreen() {
                   ) : null}
                   {["omitida_admin", "devuelta"].includes((item.estado || "").toLowerCase()) &&
                   respuestasCotizacion.length > 0
-                    ? respuestasCotizacion.map((respuesta, index) => (
-                        <View key={`archived-response-${item.id}-${index}`} style={styles.quoteSummaryCard}>
+                    ? agruparRespuestasPorProveedor(respuestasCotizacion).map((grupo, index) => (
+                        <View key={`archived-response-${item.id}-${grupo.proveedorId ?? index}`} style={styles.quoteSummaryCard}>
                           <Text style={styles.quoteSummaryTitle}>
-                            {respuesta.proveedorNombre || `Respuesta del proveedor ${index + 1}`}
+                            {grupo.proveedorNombre || `Respuesta del proveedor ${index + 1}`}
                           </Text>
-                          <Text style={styles.requestText}>Marca: {respuesta.marca}</Text>
-                          <Text style={styles.requestText}>Referencia: {respuesta.referencia}</Text>
-                          <Text style={styles.requestText}>Garantia: {respuesta.garantia}</Text>
-                          <Text style={styles.requestText}>
-                            Disponibilidad: {respuesta.disponibilidad}
+                          <Text style={styles.requestText}>Repuestos cotizados: {grupo.respuestas.length}</Text>
+                          {(item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales) ? (
+                            <View style={styles.quoteDiagnosticBlock}>
+                              <Text style={styles.quoteDiagnosticTitle}>Diagnostico del taller</Text>
+                              <Text style={styles.requestText}>
+                                Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Horas estimadas: {item.taller_diagnostico?.horas || "Sin horas"}
+                              </Text>
+                              <Text style={styles.requestText}>
+                                Repuestos solicitados: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                              </Text>
+                            </View>
+                          ) : null}
+                          {grupo.respuestas.map((respuesta, respuestaIndex) => (
+                            <View
+                              key={`archived-response-detail-${item.id}-${grupo.proveedorId ?? index}-${respuestaIndex}`}
+                              style={styles.quoteGroupItem}
+                            >
+                              <Text style={styles.requestText}>Marca: {respuesta.marca}</Text>
+                              <Text style={styles.requestText}>Referencia: {respuesta.referencia}</Text>
+                              <Text style={styles.requestText}>Garantia: {respuesta.garantia}</Text>
+                              <Text style={styles.requestText}>
+                                Disponibilidad: {respuesta.disponibilidad}
+                              </Text>
+                              <Text style={styles.requestText}>Precio: {formatCurrency(respuesta.precio)}</Text>
+                              <Text style={styles.requestText}>Observacion: {respuesta.observacion}</Text>
+                            </View>
+                          ))}
+                          {grupo.documentoExcelNombre ? (
+                            <Text style={styles.requestText}>
+                              Documento Excel: {grupo.documentoExcelNombre}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.quoteTotalText}>
+                            Valor total: {formatCurrency(calcularTotalCotizacionProveedor(grupo, item))}
                           </Text>
-                          <Text style={styles.requestText}>Precio: {formatCurrency(respuesta.precio)}</Text>
-                          <Text style={styles.requestText}>Observacion: {respuesta.observacion}</Text>
                         </View>
                       ))
                     : null}
@@ -2735,6 +3212,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#dbe4f0",
   },
+  orderPanelFull: {
+    backgroundColor: "#f8fafc",
+    borderRadius: 24,
+    padding: 0,
+    borderWidth: 0,
+  },
+  hiddenPanel: {
+    display: "none",
+  },
   panel: {
     flex: 1,
     backgroundColor: "#ffffff",
@@ -2837,6 +3323,247 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 10,
   },
+  orderHeroCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+  },
+  orderHeroText: {
+    flex: 1,
+  },
+  orderHeroTitle: {
+    color: "#08121f",
+    fontSize: 30,
+    fontWeight: "900",
+  },
+  orderHeroSubtitle: {
+    color: "#64748b",
+    fontWeight: "600",
+    marginTop: 4,
+  },
+  orderHeroActions: {
+    alignItems: "flex-end",
+    gap: 10,
+  },
+  orderHeroPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#ffffff",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  orderHeroPillText: {
+    color: "#334155",
+    fontWeight: "700",
+  },
+  orderSummaryGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 14,
+  },
+  orderSummaryCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
+    minWidth: 180,
+    flexGrow: 1,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  orderSummaryCardMobile: {
+    width: "47%",
+    minWidth: 0,
+  },
+  orderSummaryTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  orderSummaryLabel: {
+    color: "#475569",
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  orderSummaryValue: {
+    color: "#08121f",
+    fontSize: 28,
+    fontWeight: "900",
+  },
+  orderSummaryNote: {
+    color: "#64748b",
+    marginTop: 6,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  orderSummaryIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  orderAnalyticsCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  orderCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 14,
+  },
+  orderCardTitle: {
+    color: "#08121f",
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  orderCardLink: {
+    color: "#2563eb",
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  orderMiniChart: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 10,
+    minHeight: 132,
+  },
+  orderMiniChartItem: {
+    flex: 1,
+    alignItems: "center",
+    gap: 8,
+  },
+  orderMiniChartTrack: {
+    width: "100%",
+    maxWidth: 36,
+    height: 96,
+    justifyContent: "flex-end",
+    borderRadius: 14,
+    backgroundColor: "#f1f5f9",
+    overflow: "hidden",
+  },
+  orderMiniChartBar: {
+    width: "100%",
+    borderRadius: 14,
+  },
+  orderMiniChartLabel: {
+    color: "#64748b",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  orderFilterCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  orderFilterWrap: {
+    flexDirection: "row",
+    gap: 10,
+    paddingRight: 12,
+  },
+  orderListCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  orderCompactCard: {
+    backgroundColor: "#fbfdff",
+    borderRadius: 16,
+    padding: 14,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#e6edf6",
+  },
+  orderCompactRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  orderCompactIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: "#eef4ff",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+  orderCompactBody: {
+    flex: 1,
+    gap: 4,
+  },
+  orderCompactHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  orderCompactTitle: {
+    color: "#08121f",
+    fontWeight: "800",
+    flex: 1,
+  },
+  orderCompactStatusPill: {
+    backgroundColor: "#fff5de",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  orderCompactStatusText: {
+    color: "#b7791f",
+    fontWeight: "800",
+    fontSize: 12,
+  },
+  orderCompactMeta: {
+    color: "#64748b",
+    fontWeight: "600",
+    fontSize: 12,
+  },
   filterChip: {
     backgroundColor: "#eef3f9",
     borderRadius: 999,
@@ -2870,12 +3597,16 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   notificationPanel: {
-    backgroundColor: "#f8fbff",
-    borderRadius: 20,
-    padding: 18,
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
     borderColor: "#e6edf6",
-    marginBottom: 18,
+    marginBottom: 14,
+    shadowColor: "#000000",
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
   },
   notificationHeader: {
     flexDirection: "row",
@@ -2910,11 +3641,15 @@ const styles = StyleSheet.create({
   },
   requestCard: {
     backgroundColor: "#ffffff",
-    borderRadius: 18,
+    borderRadius: 16,
     padding: 16,
     marginTop: 12,
     borderWidth: 1,
     borderColor: "#e6edf6",
+    shadowColor: "#000000",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    elevation: 2,
   },
   requestHeader: {
     flexDirection: "row",
@@ -2964,11 +3699,31 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontWeight: "600",
   },
+  requestVehicleLine: {
+    color: "#64748b",
+    marginTop: 6,
+    fontWeight: "600",
+  },
+  requestMetaList: {
+    marginTop: 10,
+    gap: 8,
+  },
+  requestMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   quoteExpandHint: {
     color: "#64748b",
     marginTop: 10,
     fontSize: 12,
     fontWeight: "700",
+  },
+  trackingExpandedBlock: {
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#edf2f7",
   },
   quoteDecisionRow: {
     flexDirection: "row",
@@ -3010,6 +3765,75 @@ const styles = StyleSheet.create({
     color: "#166534",
     fontWeight: "800",
     marginBottom: 6,
+  },
+  quoteGroupItem: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#d1fae5",
+  },
+  quoteDiagnosticBlock: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#d1fae5",
+    gap: 4,
+  },
+  quoteDiagnosticTitle: {
+    color: "#166534",
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  quoteTotalText: {
+    marginTop: 10,
+    color: "#166534",
+    fontWeight: "900",
+    fontSize: 16,
+  },
+  interventionTimelineCard: {
+    marginTop: 14,
+    backgroundColor: "#f8fbff",
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#d7e4fb",
+    gap: 10,
+  },
+  interventionTimelineTitle: {
+    color: "#102447",
+    fontWeight: "800",
+    marginBottom: 2,
+  },
+  timelineStep: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  timelineIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#e2e8f0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  timelineIconCompleted: {
+    backgroundColor: "#dbeafe",
+  },
+  timelineTextGroup: {
+    flex: 1,
+    gap: 2,
+  },
+  timelineLabel: {
+    color: "#0f172a",
+    fontWeight: "700",
+  },
+  timelineState: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "600",
   },
   providerStatusCard: {
     marginTop: 14,

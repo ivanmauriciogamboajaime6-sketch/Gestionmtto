@@ -1,0 +1,22 @@
+Hola $nombre,
+
+Se registro una novedad en el flujo de mantenimiento.
+
+Solicitud: #$solicitud_id
+Etapa: $etapa
+Tipo de servicio: $tipo_servicio
+Estado actual: $estado_actual
+Gestionado por: $actor
+
+Resumen:
+$mensaje
+
+Accion requerida:
+$accion_requerida
+
+Detalle adicional:
+$detalle_adicional
+
+Referencia: $referencia
+
+Equipo MTTO Vehicular

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Platform,
@@ -13,14 +13,12 @@ import {
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
 import { formatDateTime } from "../../constants/formatters";
 import {
-  getStatusLabel,
-  isApprovedStatus,
-  isDiagnosedStatus,
+  getStatusTone,
   isFinishedStatus,
-  isInDiagnosisStatus,
   isInProcessStatus,
   isRejectedWorkshopStatus,
   normalizeStatus,
@@ -30,6 +28,7 @@ import storage from "../../constants/storage";
 type Solicitud = {
   id?: number | string;
   numero_caso?: number | string | null;
+  solicitud_origen_id?: number | string | null;
   vehiculo?: { marca?: string; modelo?: string; placa?: string };
   cliente?: { nombre?: string };
   tipo_servicio?: string;
@@ -43,6 +42,20 @@ type Solicitud = {
     fecha_disponible?: string | null;
     horario_disponible?: string | null;
   };
+  taller_diagnostico?: {
+    diagnostico?: string | null;
+    servicios?: string | null;
+    horas?: string | null;
+    materiales?: string | null;
+  };
+  flujo_mantenimiento?: {
+    repuestos_solicitados?: {
+      nombre?: string | null;
+      cantidad?: number | null;
+    }[];
+    timeline?: Record<string, string | null>;
+    confirmaciones?: Record<string, boolean | string | null>;
+  };
 };
 
 type Notificacion = {
@@ -50,6 +63,14 @@ type Notificacion = {
   titulo?: string;
   mensaje?: string;
   leida?: boolean;
+};
+
+type DiagnosticFormState = {
+  diagnostico: string;
+  servicios: string;
+  horas: string;
+  materiales: string;
+  repuestos: { nombre: string; cantidad: string }[];
 };
 
 const sections = [
@@ -77,7 +98,38 @@ const getToken = async () => {
 const getVehicleName = (item: Solicitud) =>
   [item.vehiculo?.marca, item.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo sin nombre";
 
-const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.id;
+const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.solicitud_origen_id ?? item.id;
+
+const getWorkshopPriority = (item: Solicitud) => {
+  const state = normalizeStatus(item.estado);
+
+  if (isFinishedStatus(state)) return 700;
+  if (isInProcessStatus(state)) return 600;
+  if (["aprobada", "repuestos_despachados"].includes(state)) return 500;
+  if (["diagnosticada", "pendiente_envio_cliente_taller", "espera_cliente"].includes(state)) return 400;
+  if (state === "en_diagnostico") return 300;
+  if (state === "en_asignacion_taller") return 200;
+  return 100;
+};
+
+const dedupeWorkshopRequests = (items: Solicitud[]) => {
+  const grouped = new Map<string, Solicitud[]>();
+
+  items.forEach((item) => {
+    const key = String(getCaseNumber(item) ?? item.id ?? "");
+    const current = grouped.get(key) || [];
+    current.push(item);
+    grouped.set(key, current);
+  });
+
+  return Array.from(grouped.values()).map((group) =>
+    [...group].sort((left, right) => {
+      const priorityDiff = getWorkshopPriority(right) - getWorkshopPriority(left);
+      if (priorityDiff !== 0) return priorityDiff;
+      return Number(right.id || 0) - Number(left.id || 0);
+    })[0]
+  );
+};
 
 const getRequestTitle = (tipoServicio?: string) => {
   const value = (tipoServicio || "").toLowerCase();
@@ -95,12 +147,6 @@ const getRequestTitle = (tipoServicio?: string) => {
   return tipoServicio || "Solicitud de mantenimiento";
 };
 
-const getStateLabel = (value?: string) => {
-  const state = normalizeStatus(value);
-  if (state === "creada") return "Creada";
-  return getStatusLabel(state);
-};
-
 const getPriority = (item: Solicitud): keyof typeof priorities => {
   const service = (item.tipo_servicio || "").toLowerCase();
   const problem = (item.problema || "").toLowerCase();
@@ -114,6 +160,46 @@ const extractOrderId = (item: Notificacion) => {
   return match?.[1] || null;
 };
 
+type PickerModalState = {
+  requestId: string;
+  field: "fechaDisponible" | "horarioDisponible";
+} | null;
+
+const formatDateFieldLabel = (value: string) => {
+  if (!value) return "Seleccionar fecha";
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return value;
+  const date = new Date(year, month - 1, day);
+  return date.toLocaleDateString("es-CO", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+const formatTimeFieldLabel = (value: string) => {
+  if (!value) return "Seleccionar hora";
+  const [hours, minutes] = value.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return value;
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date.toLocaleTimeString("es-CO", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
+const formatWorkshopDateLabel = (value?: string | null) => {
+  if (!value) return "Sin fecha";
+  return formatDateFieldLabel(value);
+};
+
+const formatWorkshopTimeLabel = (value?: string | null) => {
+  if (!value) return "Sin horario";
+  return formatTimeFieldLabel(value);
+};
+
 export default function TallerDashboard() {
   const router = useRouter();
   const { width } = useWindowDimensions();
@@ -124,16 +210,34 @@ export default function TallerDashboard() {
   const [selectedSection, setSelectedSection] = useState("Vista general");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [selectedVehicleFilter, setSelectedVehicleFilter] = useState("Todos");
+  const [selectedDateFilter, setSelectedDateFilter] = useState("Todas");
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [openQuoteFormId, setOpenQuoteFormId] = useState<string | null>(null);
+  const [pickerModal, setPickerModal] = useState<PickerModalState>(null);
   const [quoteForms, setQuoteForms] = useState<
-    Record<string, { comentario: string; fechaDisponible: string; horarioDisponible: string }>
+    Record<string, { comentarioCliente: string; comentarioAdmin: string; fechaDisponible: string; horarioDisponible: string }>
   >({});
+  const [openDiagnosticFormId, setOpenDiagnosticFormId] = useState<string | null>(null);
+  const [diagnosticForms, setDiagnosticForms] = useState<Record<string, DiagnosticFormState>>({});
 
   useEffect(() => {
     cargarDashboard();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      cargarDashboard();
+
+      const interval = setInterval(() => {
+        cargarDashboard();
+      }, 8000);
+
+      return () => clearInterval(interval);
+    }, [])
+  );
 
   const cargarDashboard = async () => {
     await Promise.all([cargarSolicitudes(), cargarNotificaciones()]);
@@ -226,13 +330,14 @@ export default function TallerDashboard() {
 
   const actualizarCampoCotizacion = (
     solicitudId: string,
-    field: "comentario" | "fechaDisponible" | "horarioDisponible",
+    field: "comentarioCliente" | "comentarioAdmin" | "fechaDisponible" | "horarioDisponible",
     value: string
   ) => {
     setQuoteForms((current) => ({
       ...current,
       [solicitudId]: {
-        comentario: current[solicitudId]?.comentario || "",
+        comentarioCliente: current[solicitudId]?.comentarioCliente || "",
+        comentarioAdmin: current[solicitudId]?.comentarioAdmin || "",
         fechaDisponible: current[solicitudId]?.fechaDisponible || "",
         horarioDisponible: current[solicitudId]?.horarioDisponible || "",
         [field]: value,
@@ -247,22 +352,160 @@ export default function TallerDashboard() {
     setQuoteForms((current) => ({
       ...current,
       [solicitudId]: current[solicitudId] || {
-        comentario: item.respuesta_taller?.comentario || item.observacion || "",
+        comentarioCliente: item.respuesta_taller?.comentario || "",
+        comentarioAdmin: item.observacion || "",
         fechaDisponible: item.respuesta_taller?.fecha_disponible || "",
         horarioDisponible: item.respuesta_taller?.horario_disponible || "",
       },
     }));
   };
 
+  const abrirFormularioDiagnostico = (item: Solicitud) => {
+    const solicitudId = String(item.id ?? "");
+    setOpenDiagnosticFormId((current) => (current === solicitudId ? null : solicitudId));
+    setExpandedRequestId(solicitudId);
+    setDiagnosticForms((current) => ({
+      ...current,
+      [solicitudId]: current[solicitudId] || {
+        diagnostico: item.taller_diagnostico?.diagnostico || "",
+        servicios: item.taller_diagnostico?.servicios || item.tipo_servicio || "",
+        horas: item.taller_diagnostico?.horas || "",
+        materiales: item.taller_diagnostico?.materiales || "",
+        repuestos:
+          item.flujo_mantenimiento?.repuestos_solicitados?.length
+            ? item.flujo_mantenimiento.repuestos_solicitados.map((repuesto) => ({
+                nombre: repuesto.nombre || "",
+                cantidad: String(repuesto.cantidad || ""),
+              }))
+            : [{ nombre: "", cantidad: "1" }],
+      },
+    }));
+  };
+
+  const actualizarCampoDiagnostico = (
+    solicitudId: string,
+    field: "diagnostico" | "servicios" | "horas" | "materiales",
+    value: string
+  ) => {
+    setDiagnosticForms((current) => ({
+      ...current,
+      [solicitudId]: {
+        ...(current[solicitudId] || {
+          diagnostico: "",
+          servicios: "",
+          horas: "",
+          materiales: "",
+          repuestos: [{ nombre: "", cantidad: "1" }],
+        }),
+        [field]: value,
+      },
+    }));
+  };
+
+  const actualizarRepuestoDiagnostico = (
+    solicitudId: string,
+    index: number,
+    field: "nombre" | "cantidad",
+    value: string
+  ) => {
+    setDiagnosticForms((current) => {
+      const form = current[solicitudId] || {
+        diagnostico: "",
+        servicios: "",
+        horas: "",
+        materiales: "",
+        repuestos: [{ nombre: "", cantidad: "1" }],
+      };
+
+      return {
+        ...current,
+        [solicitudId]: {
+          ...form,
+          repuestos: form.repuestos.map((item, itemIndex) =>
+            itemIndex === index
+              ? { ...item, [field]: field === "cantidad" ? value.replace(/\D/g, "").slice(0, 3) : value.slice(0, 120) }
+              : item
+          ),
+        },
+      };
+    });
+  };
+
+  const agregarRepuestoDiagnostico = (solicitudId: string) => {
+    setDiagnosticForms((current) => ({
+      ...current,
+      [solicitudId]: {
+        ...(current[solicitudId] || {
+          diagnostico: "",
+          servicios: "",
+          horas: "",
+          materiales: "",
+          repuestos: [],
+        }),
+        repuestos: [...(current[solicitudId]?.repuestos || []), { nombre: "", cantidad: "1" }],
+      },
+    }));
+  };
+
+  const enviarDiagnostico = async (item: Solicitud) => {
+    const solicitudId = String(item.id ?? "");
+    const form = diagnosticForms[solicitudId];
+
+    if (!form?.diagnostico.trim() || !form?.servicios.trim() || !form?.horas.trim()) {
+      Alert.alert("Campos requeridos", "Debes completar diagnostico, servicios y horas estimadas.");
+      return;
+    }
+
+    const repuestos = (form.repuestos || [])
+      .filter((repuesto) => String(repuesto.nombre || "").trim().length > 0)
+      .map((repuesto) => ({
+        nombre: String(repuesto.nombre || "").trim(),
+        cantidad: Math.max(1, Number(repuesto.cantidad || "1")),
+      }));
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/diagnostico-taller`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          diagnostico: form.diagnostico.trim(),
+          servicios: form.servicios.trim(),
+          horas: form.horas.trim(),
+          materiales: form.materiales.trim(),
+          repuestos,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Error", data.detail || "No se pudo enviar el diagnostico");
+        return;
+      }
+
+      setOpenDiagnosticFormId(null);
+      await cargarSolicitudes();
+      Alert.alert("Enviado", "El diagnostico y los repuestos solicitados fueron enviados al administrador.");
+    } catch (error) {
+      console.log("error enviando diagnostico taller", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
+  };
+
   const aprobarSolicitudTaller = async (item: Solicitud) => {
     const solicitudId = String(item.id ?? "");
     const form = quoteForms[solicitudId] || {
-      comentario: "",
+      comentarioCliente: "",
+      comentarioAdmin: "",
       fechaDisponible: "",
       horarioDisponible: "",
     };
 
-    if (!form.comentario.trim() || !form.fechaDisponible.trim() || !form.horarioDisponible.trim()) {
+    if (!form.comentarioCliente.trim() || !form.fechaDisponible.trim() || !form.horarioDisponible.trim()) {
       Alert.alert("Campos requeridos", "Debes completar comentario, fecha y horario disponible.");
       return;
     }
@@ -281,7 +524,7 @@ export default function TallerDashboard() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          comentario: form.comentario.trim(),
+          comentario: form.comentarioCliente.trim(),
           fecha_disponible: form.fechaDisponible.trim(),
           horario_disponible: form.horarioDisponible.trim(),
         }),
@@ -290,13 +533,13 @@ export default function TallerDashboard() {
       const data = await response.json();
 
       if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo enviar la respuesta al administrador");
+        Alert.alert("Error", data.detail || "No se pudo confirmar la disponibilidad del taller");
         return;
       }
 
       setOpenQuoteFormId(null);
       await cargarSolicitudes();
-      Alert.alert("Enviado", "La aprobacion del taller fue enviada al administrador.");
+      Alert.alert("Disponibilidad enviada", "La informacion fue enviada al cliente y el administrador fue notificado.");
     } catch (error) {
       console.log("error enviando respuesta taller", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -330,37 +573,54 @@ export default function TallerDashboard() {
     () =>
       solicitudes.filter((item) => {
         const state = normalizeStatus(item.estado);
-        return !["cotizando", "cotizado", "devuelta", "devuelto_proveedor", "omitida_admin", "archivada", "enviado_cliente"].includes(state);
+        return !["cotizando", "cotizado", "devuelta", "devuelto_proveedor", "omitida_admin", "archivada", "enviado_cliente", "enviada_cliente"].includes(state);
       }),
     [solicitudes]
   );
 
   const requestsReceived = useMemo(
-    () => workshopRequests.filter((item) => isInDiagnosisStatus(item.estado)),
+    () => dedupeWorkshopRequests(workshopRequests.filter((item) => normalizeStatus(item.estado) === "en_asignacion_taller")),
     [workshopRequests]
   );
   const diagnosticRequests = useMemo(
-    () => workshopRequests.filter((item) => isInDiagnosisStatus(item.estado)),
+    () => dedupeWorkshopRequests(workshopRequests.filter((item) => normalizeStatus(item.estado) === "en_diagnostico")),
     [workshopRequests]
   );
   const waitingAdminRequests = useMemo(
-    () => workshopRequests.filter((item) => isDiagnosedStatus(item.estado)),
+    () =>
+      dedupeWorkshopRequests(
+        workshopRequests.filter((item) =>
+          ["diagnosticada", "pendiente_envio_cliente_taller", "espera_cliente"].includes(normalizeStatus(item.estado))
+        )
+      ),
     [workshopRequests]
   );
   const approvedRequests = useMemo(
-    () => workshopRequests.filter((item) => isApprovedStatus(item.estado)),
+    () =>
+      dedupeWorkshopRequests(
+        workshopRequests.filter((item) =>
+          ["aprobada", "repuestos_despachados"].includes(normalizeStatus(item.estado))
+        )
+      ),
     [workshopRequests]
   );
   const inProgressRequests = useMemo(
-    () => workshopRequests.filter((item) => isInProcessStatus(item.estado)),
+    () =>
+      dedupeWorkshopRequests(
+        workshopRequests.filter((item) =>
+          ["intervencion_iniciada", "repuestos_recibidos_taller", "en_proceso", "en_reparacion"].includes(
+            normalizeStatus(item.estado)
+          )
+        )
+      ),
     [workshopRequests]
   );
   const finishedRequests = useMemo(
-    () => workshopRequests.filter((item) => isFinishedStatus(item.estado)),
+    () => dedupeWorkshopRequests(workshopRequests.filter((item) => isFinishedStatus(item.estado))),
     [workshopRequests]
   );
   const returnedRequests = useMemo(
-    () => workshopRequests.filter((item) => isRejectedWorkshopStatus(item.estado)),
+    () => dedupeWorkshopRequests(workshopRequests.filter((item) => isRejectedWorkshopStatus(item.estado))),
     [workshopRequests]
   );
   const delayedRequests = useMemo(
@@ -375,6 +635,20 @@ export default function TallerDashboard() {
   );
 
   const unreadNotifications = notificaciones.filter((item) => !item.leida).length;
+  const workshopVehicleFilters = useMemo(
+    () => [
+      "Todos",
+      ...Array.from(
+        new Set(
+          solicitudes
+            .map((item) => getVehicleName(item))
+            .filter((item) => item && item !== "Vehiculo sin nombre")
+        )
+      ),
+    ],
+    [solicitudes]
+  );
+  const workshopDateFilters = ["Todas", "Hoy", "Ultimos 7 dias", "Sin fecha"];
   const kpis = [
     { label: "Solicitudes nuevas", value: requestsReceived.length, color: "#2563eb" },
     { label: "En diagnostico", value: diagnosticRequests.length, color: "#f97316" },
@@ -383,6 +657,171 @@ export default function TallerDashboard() {
     { label: "Finalizadas", value: finishedRequests.length, color: "#0f766e" },
   ];
 
+  const matchesQuickFilters = useCallback(
+    (item: Solicitud) => {
+      const vehicleMatch =
+        selectedVehicleFilter === "Todos" || getVehicleName(item) === selectedVehicleFilter;
+
+      const rawDate = item.fecha;
+      const parsedDate = rawDate ? new Date(rawDate) : null;
+      const hasDate = parsedDate != null && !Number.isNaN(parsedDate.getTime());
+      const now = new Date();
+      const diffMs = hasDate ? now.getTime() - parsedDate.getTime() : null;
+      const dayMs = 1000 * 60 * 60 * 24;
+
+      const dateMatch =
+        selectedDateFilter === "Todas" ||
+        (selectedDateFilter === "Sin fecha" && !hasDate) ||
+        (selectedDateFilter === "Hoy" &&
+          hasDate &&
+          parsedDate!.toDateString() === now.toDateString()) ||
+        (selectedDateFilter === "Ultimos 7 dias" &&
+          hasDate &&
+          diffMs != null &&
+          diffMs <= dayMs * 7);
+
+      return vehicleMatch && dateMatch;
+    },
+    [selectedDateFilter, selectedVehicleFilter]
+  );
+
+  const filtrarSolicitudes = useCallback(
+    (items: Solicitud[]) => items.filter((item) => matchesQuickFilters(item)),
+    [matchesQuickFilters]
+  );
+
+  const mobileDateOptions = useMemo(() => {
+    const today = new Date();
+    return Array.from({ length: 30 }, (_, index) => {
+      const current = new Date(today);
+      current.setDate(today.getDate() + index);
+      const value = current.toISOString().slice(0, 10);
+      return { value, label: formatDateFieldLabel(value) };
+    });
+  }, []);
+
+  const mobileTimeOptions = useMemo(() => {
+    const options: { value: string; label: string }[] = [];
+    for (let hour = 6; hour <= 20; hour += 1) {
+      for (const minute of [0, 30]) {
+        const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+        options.push({ value, label: formatTimeFieldLabel(value) });
+      }
+    }
+    return options;
+  }, []);
+
+  const renderQuickFilterModal = () =>
+    showFilterModal ? (
+      <View style={styles.quickFilterOverlay} pointerEvents="box-none">
+        <Pressable style={styles.quickFilterBackdrop} onPress={() => setShowFilterModal(false)} />
+        <View style={styles.quickFilterCard}>
+          <Text style={styles.quickFilterTitle}>Filtros rapidos</Text>
+          <Text style={styles.quickFilterLabel}>Vehiculo</Text>
+          <View style={styles.quickFilterChipWrap}>
+            {workshopVehicleFilters.map((filter) => (
+              <TouchableOpacity
+                key={filter}
+                style={[
+                  styles.quickFilterChip,
+                  selectedVehicleFilter === filter && styles.quickFilterChipActive,
+                ]}
+                onPress={() => setSelectedVehicleFilter(filter)}
+              >
+                <Text
+                  style={[
+                    styles.quickFilterChipText,
+                    selectedVehicleFilter === filter && styles.quickFilterChipTextActive,
+                  ]}
+                >
+                  {filter}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={styles.quickFilterLabel}>Fecha</Text>
+          <View style={styles.quickFilterChipWrap}>
+            {workshopDateFilters.map((filter) => (
+              <TouchableOpacity
+                key={filter}
+                style={[
+                  styles.quickFilterChip,
+                  selectedDateFilter === filter && styles.quickFilterChipActive,
+                ]}
+                onPress={() => setSelectedDateFilter(filter)}
+              >
+                <Text
+                  style={[
+                    styles.quickFilterChipText,
+                    selectedDateFilter === filter && styles.quickFilterChipTextActive,
+                  ]}
+                >
+                  {filter}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.quickFilterActions}>
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={() => {
+                setSelectedVehicleFilter("Todos");
+                setSelectedDateFilter("Todas");
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>Limpiar</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => setShowFilterModal(false)}>
+              <Text style={styles.primaryButtonText}>Aplicar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    ) : null;
+
+  const renderSchedulePickerModal = () => {
+    if (!pickerModal || Platform.OS === "web") return null;
+
+    const options = pickerModal.field === "fechaDisponible" ? mobileDateOptions : mobileTimeOptions;
+    const selectedValue = quoteForms[pickerModal.requestId]?.[pickerModal.field] || "";
+    const title = pickerModal.field === "fechaDisponible" ? "Seleccionar fecha disponible" : "Seleccionar horario disponible";
+
+    return (
+      <View style={styles.quickFilterOverlay} pointerEvents="box-none">
+        <Pressable style={styles.quickFilterBackdrop} onPress={() => setPickerModal(null)} />
+        <View style={styles.pickerModalCard}>
+          <Text style={styles.quickFilterTitle}>{title}</Text>
+          <ScrollView style={styles.pickerScrollArea} showsVerticalScrollIndicator={false}>
+            <View style={styles.pickerOptionList}>
+              {options.map((option) => {
+                const active = selectedValue === option.value;
+                return (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[styles.pickerOptionButton, active && styles.pickerOptionButtonActive]}
+                    onPress={() => {
+                      actualizarCampoCotizacion(pickerModal.requestId, pickerModal.field, option.value);
+                      setPickerModal(null);
+                    }}
+                  >
+                    <Text style={[styles.pickerOptionText, active && styles.pickerOptionTextActive]}>
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </ScrollView>
+          <View style={styles.quickFilterActions}>
+            <TouchableOpacity style={styles.secondaryButton} onPress={() => setPickerModal(null)}>
+              <Text style={styles.secondaryButtonText}>Cerrar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
   const renderRequestCard = (
     item: Solicitud,
     options?: {
@@ -390,6 +829,7 @@ export default function TallerDashboard() {
       showReturn?: boolean;
       showDiagnosticSend?: boolean;
       showStart?: boolean;
+      showReceiveParts?: boolean;
       showProgress?: boolean;
       showFinish?: boolean;
       showInfo?: boolean;
@@ -400,11 +840,44 @@ export default function TallerDashboard() {
     const isHighlighted = highlightedOrderId === id;
     const priority = priorities[getPriority(item)];
     const isQuoteFormOpen = openQuoteFormId === id;
+    const isDiagnosticFormOpen = openDiagnosticFormId === id;
+    const hasWorkshopAvailability = Boolean(
+      item.respuesta_taller?.fecha_disponible ||
+      item.respuesta_taller?.horario_disponible ||
+      item.respuesta_taller?.comentario
+    );
     const quoteForm = quoteForms[id] || {
-      comentario: item.respuesta_taller?.comentario || item.observacion || "",
+      comentarioCliente: item.respuesta_taller?.comentario || "",
+      comentarioAdmin: item.observacion || "",
       fechaDisponible: item.respuesta_taller?.fecha_disponible || "",
       horarioDisponible: item.respuesta_taller?.horario_disponible || "",
     };
+    const diagnosticForm = diagnosticForms[id] || {
+      diagnostico: item.taller_diagnostico?.diagnostico || "",
+      servicios: item.taller_diagnostico?.servicios || item.tipo_servicio || "",
+      horas: item.taller_diagnostico?.horas || "",
+      materiales: item.taller_diagnostico?.materiales || "",
+      repuestos: [{ nombre: "", cantidad: "1" }],
+    };
+    const statusTone = getStatusTone(item.estado);
+    const trackingSteps = [
+      {
+        label: "Proveedor despacho repuestos",
+        completed: Boolean(item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado),
+      },
+      {
+        label: "Taller inicio intervencion",
+        completed: Boolean(item.flujo_mantenimiento?.confirmaciones?.taller_inicio_intervencion_confirmado),
+      },
+      {
+        label: "Taller recibio repuestos",
+        completed: Boolean(item.flujo_mantenimiento?.confirmaciones?.taller_recibe_repuestos_confirmado),
+      },
+      {
+        label: "Reparacion final",
+        completed: Boolean(item.flujo_mantenimiento?.confirmaciones?.taller_reparacion_finalizada),
+      },
+    ];
 
     return (
       <TouchableOpacity
@@ -415,19 +888,28 @@ export default function TallerDashboard() {
       >
         <View style={styles.requestHeader}>
           <View style={styles.requestHeaderMain}>
-            <Text style={styles.requestTitle}>Solicitud #{getCaseNumber(item)}</Text>
-            <Text style={styles.requestSubtitle}>{getRequestTitle(item.tipo_servicio)}</Text>
+            <Text style={styles.requestTitle}>{getRequestTitle(item.tipo_servicio)}</Text>
+            <Text style={styles.requestSubtitle}>{getVehicleName(item)}{item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}</Text>
           </View>
-          <View style={styles.statePill}>
-            <Text style={styles.statePillText}>{getStateLabel(item.estado)}</Text>
+          <View style={[styles.statePill, { backgroundColor: statusTone.backgroundColor, borderColor: statusTone.borderColor }]}>
+            <Text style={[styles.statePillText, { color: statusTone.color }]}>{statusTone.label}</Text>
           </View>
         </View>
 
-        <Text style={styles.metaText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
-        <Text style={styles.metaText}>Vehiculo: {getVehicleName(item)}</Text>
-        <Text style={styles.metaText}>Problema: {item.problema || "Sin descripcion"}</Text>
-        <Text style={styles.metaText}>Disponibilidad cliente: {item.disponibilidad_cliente || "Sin registrar"}</Text>
-        <Text style={styles.metaText}>Fecha: {formatDateTime(item.fecha)}</Text>
+        <View style={styles.requestMetaList}>
+          <View style={styles.requestMetaRow}>
+            <MaterialCommunityIcons name="account-outline" size={16} color="#6b7280" />
+            <Text style={styles.metaText}>Cliente: {item.cliente?.nombre || "Sin nombre"}</Text>
+          </View>
+          <View style={styles.requestMetaRow}>
+            <MaterialCommunityIcons name="calendar-blank-outline" size={16} color="#6b7280" />
+            <Text style={styles.metaText}>{formatDateTime(item.fecha)}</Text>
+          </View>
+          <View style={styles.requestMetaRow}>
+            <MaterialCommunityIcons name="tools" size={16} color="#6b7280" />
+            <Text style={styles.metaText}>Problema: {item.problema || "Sin descripcion"}</Text>
+          </View>
+        </View>
 
         <View style={[styles.priorityPill, { backgroundColor: priority.bg, borderColor: priority.border }]}>
           <Text style={[styles.priorityText, { color: priority.text }]}>Prioridad {getPriority(item)}</Text>
@@ -440,16 +922,35 @@ export default function TallerDashboard() {
             <Text style={styles.expandedText}>Placa: {item.vehiculo?.placa || "Sin placa"}</Text>
             <Text style={styles.expandedText}>Servicio: {item.tipo_servicio || "Sin servicio"}</Text>
             <Text style={styles.expandedText}>Recepcion en taller: {formatDateTime(item.fecha)}</Text>
-            {options?.showInfo ? (
+            <Text style={styles.expandedText}>Disponibilidad del cliente: {item.disponibilidad_cliente || "Sin registrar"}</Text>
+            {options?.showInfo && !hasWorkshopAvailability ? (
               <View style={styles.infoBanner}>
                 <MaterialCommunityIcons name="information-outline" size={18} color="#2563eb" />
-                <Text style={styles.infoBannerText}>Aprueba o rechaza la solicitud. Si la apruebas, envias fecha, horario y comentario al administrador.</Text>
+                <Text style={styles.infoBannerText}>
+                  {options?.showDiagnosticSend
+                    ? "Despues de que el cliente confirme la llegada al taller, registra el diagnostico y los repuestos requeridos."
+                    : "Aprueba o rechaza la solicitud. Si la apruebas, registras fecha, horario y comentario para que el cliente confirme su llegada al taller."}
+                </Text>
+              </View>
+            ) : null}
+            {hasWorkshopAvailability ? (
+              <View style={styles.sentAvailabilityCard}>
+                <Text style={styles.sentAvailabilityTitle}>Disponibilidad enviada al cliente</Text>
+                <Text style={styles.expandedText}>
+                  Fecha disponible: {formatWorkshopDateLabel(item.respuesta_taller?.fecha_disponible)}
+                </Text>
+                <Text style={styles.expandedText}>
+                  Horario disponible: {formatWorkshopTimeLabel(item.respuesta_taller?.horario_disponible)}
+                </Text>
+                <Text style={styles.expandedText}>
+                  Comentario enviado: {item.respuesta_taller?.comentario || "Sin comentario"}
+                </Text>
               </View>
             ) : null}
             <View style={styles.actionRow}>
               {options?.showQuote ? (
                 <TouchableOpacity
-                  style={styles.primaryButton}
+                  style={[styles.primaryButton, styles.inlineActionButton]}
                   onPress={() => abrirFormularioCotizacion(item)}
                 >
                   <Text style={styles.primaryButtonText}>
@@ -457,22 +958,22 @@ export default function TallerDashboard() {
                   </Text>
                 </TouchableOpacity>
               ) : null}
-              {options?.showReturn ? (
+              {options?.showReturn && !isQuoteFormOpen ? (
                 <View style={styles.returnBlock}>
                   <TextInput
                     style={[styles.quoteInput, styles.quoteInputMultiline]}
-                    value={quoteForm.comentario}
-                    onChangeText={(value) => actualizarCampoCotizacion(id, "comentario", value)}
+                    value={quoteForm.comentarioAdmin}
+                    onChangeText={(value) => actualizarCampoCotizacion(id, "comentarioAdmin", value)}
                     placeholder="Comentario para devolver al administrador"
                     placeholderTextColor="#94a3b8"
                     multiline
                     maxLength={200}
                   />
-                  <Text style={styles.commentCounter}>{quoteForm.comentario.length}/200</Text>
+                  <Text style={styles.commentCounter}>{quoteForm.comentarioAdmin.length}/200</Text>
                   <TouchableOpacity
-                    style={styles.dangerButton}
+                    style={[styles.dangerButton, styles.inlineActionButton]}
                     onPress={() => {
-                      const comentario = quoteForm.comentario.trim();
+                      const comentario = quoteForm.comentarioAdmin.trim();
                       if (!comentario) {
                         Alert.alert("Comentario requerido", "Debes escribir un comentario para devolver la solicitud.");
                         return;
@@ -492,9 +993,17 @@ export default function TallerDashboard() {
               {options?.showStart ? (
                 <TouchableOpacity
                   style={styles.primaryButton}
-                  onPress={() => actualizarEstadoSolicitud(id, "en_proceso", "El trabajo fue iniciado.")}
+                  onPress={() => actualizarEstadoSolicitud(id, "intervencion_iniciada", "La intervencion fue iniciada.")}
                 >
-                  <Text style={styles.primaryButtonText}>Iniciar trabajo</Text>
+                  <Text style={styles.primaryButtonText}>Iniciar intervencion</Text>
+                </TouchableOpacity>
+              ) : null}
+              {options?.showReceiveParts ? (
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={() => actualizarEstadoSolicitud(id, "repuestos_recibidos_taller", "Los repuestos fueron recibidos por el taller.")}
+                >
+                  <Text style={styles.secondaryButtonText}>Recibir repuestos</Text>
                 </TouchableOpacity>
               ) : null}
               {options?.showProgress ? (
@@ -514,44 +1023,219 @@ export default function TallerDashboard() {
 
             {options?.showQuote && isQuoteFormOpen ? (
               <View style={styles.quoteFormCard}>
-                <Text style={styles.quoteFormTitle}>Aprobacion del taller</Text>
+                <Text style={styles.quoteFormTitle}>Disponibilidad del taller</Text>
 
                 <Text style={styles.quoteFormLabel}>Comentario</Text>
                 <TextInput
                   style={[styles.quoteInput, styles.quoteInputMultiline]}
-                  value={quoteForm.comentario}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "comentario", value)}
-                  placeholder="Comentario para el administrador y el cliente"
+                  value={quoteForm.comentarioCliente}
+                  onChangeText={(value) => actualizarCampoCotizacion(id, "comentarioCliente", value)}
+                  placeholder="Comentario para el cliente"
                   placeholderTextColor="#94a3b8"
                   multiline
                 />
 
                 <Text style={styles.quoteFormLabel}>Fecha disponible</Text>
-                <TextInput
-                  style={styles.quoteInput}
-                  value={quoteForm.fechaDisponible}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "fechaDisponible", value)}
-                  placeholder="2026-03-30"
-                  placeholderTextColor="#94a3b8"
-                />
+                {Platform.OS === "web" ? (
+                  <View style={styles.webPickerShell}>
+                    {React.createElement("input" as any, {
+                      type: "date",
+                      value: quoteForm.fechaDisponible,
+                      min: new Date().toISOString().slice(0, 10),
+                      onChange: (event: { target: { value: string } }) =>
+                        actualizarCampoCotizacion(id, "fechaDisponible", event.target.value),
+                      style: {
+                        width: "100%",
+                        minHeight: 48,
+                        borderWidth: 0,
+                        outlineStyle: "none",
+                        backgroundColor: "transparent",
+                        color: "#08121f",
+                        fontSize: 16,
+                        padding: "0 2px",
+                      },
+                    })}
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.mobilePickerField}
+                    activeOpacity={0.88}
+                    onPress={() => setPickerModal({ requestId: id, field: "fechaDisponible" })}
+                  >
+                    <View style={styles.mobilePickerFieldContent}>
+                      <MaterialCommunityIcons name="calendar-month-outline" size={18} color="#64748b" />
+                      <Text
+                        style={[
+                          styles.mobilePickerFieldText,
+                          !quoteForm.fechaDisponible && styles.mobilePickerPlaceholderText,
+                        ]}
+                      >
+                        {formatDateFieldLabel(quoteForm.fechaDisponible)}
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
+                  </TouchableOpacity>
+                )}
 
                 <Text style={styles.quoteFormLabel}>Horario disponible</Text>
-                <TextInput
-                  style={styles.quoteInput}
-                  value={quoteForm.horarioDisponible}
-                  onChangeText={(value) => actualizarCampoCotizacion(id, "horarioDisponible", value)}
-                  placeholder="8:00 a. m. a 11:00 a. m."
-                  placeholderTextColor="#94a3b8"
-                />
+                {Platform.OS === "web" ? (
+                  <View style={styles.webPickerShell}>
+                    {React.createElement("input" as any, {
+                      type: "time",
+                      value: quoteForm.horarioDisponible,
+                      onChange: (event: { target: { value: string } }) =>
+                        actualizarCampoCotizacion(id, "horarioDisponible", event.target.value),
+                      style: {
+                        width: "100%",
+                        minHeight: 48,
+                        borderWidth: 0,
+                        outlineStyle: "none",
+                        backgroundColor: "transparent",
+                        color: "#08121f",
+                        fontSize: 16,
+                        padding: "0 2px",
+                      },
+                    })}
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.mobilePickerField}
+                    activeOpacity={0.88}
+                    onPress={() => setPickerModal({ requestId: id, field: "horarioDisponible" })}
+                  >
+                    <View style={styles.mobilePickerFieldContent}>
+                      <MaterialCommunityIcons name="clock-time-four-outline" size={18} color="#64748b" />
+                      <Text
+                        style={[
+                          styles.mobilePickerFieldText,
+                          !quoteForm.horarioDisponible && styles.mobilePickerPlaceholderText,
+                        ]}
+                      >
+                        {formatTimeFieldLabel(quoteForm.horarioDisponible)}
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
+                  </TouchableOpacity>
+                )}
 
                 <TouchableOpacity
-                  style={styles.primaryButton}
+                  style={[styles.primaryButton, styles.formSubmitButton]}
                   onPress={() => aprobarSolicitudTaller(item)}
                 >
-                  <Text style={styles.primaryButtonText}>Enviar al admin</Text>
+                  <Text style={styles.primaryButtonText}>Confirmar disponibilidad</Text>
                 </TouchableOpacity>
               </View>
             ) : null}
+
+            {options?.showDiagnosticSend ? (
+              <View style={styles.quoteFormCard}>
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => abrirFormularioDiagnostico(item)}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {isDiagnosticFormOpen ? "Ocultar diagnostico" : "Registrar diagnostico"}
+                  </Text>
+                </TouchableOpacity>
+
+                {isDiagnosticFormOpen ? (
+                  <>
+                    <Text style={styles.quoteFormLabel}>Diagnostico</Text>
+                    <TextInput
+                      style={[styles.quoteInput, styles.quoteInputMultiline]}
+                      value={diagnosticForm.diagnostico}
+                      onChangeText={(value) => actualizarCampoDiagnostico(id, "diagnostico", value)}
+                      placeholder="Descripcion del diagnostico"
+                      placeholderTextColor="#94a3b8"
+                      multiline
+                    />
+
+                    <Text style={styles.quoteFormLabel}>Servicios a realizar</Text>
+                    <TextInput
+                      style={[styles.quoteInput, styles.quoteInputMultiline]}
+                      value={diagnosticForm.servicios}
+                      onChangeText={(value) => actualizarCampoDiagnostico(id, "servicios", value)}
+                      placeholder="Servicios y labores a ejecutar"
+                      placeholderTextColor="#94a3b8"
+                      multiline
+                    />
+
+                    <Text style={styles.quoteFormLabel}>Horas estimadas</Text>
+                    <TextInput
+                      style={styles.quoteInput}
+                      value={diagnosticForm.horas}
+                      onChangeText={(value) => actualizarCampoDiagnostico(id, "horas", value)}
+                      placeholder="4 horas"
+                      placeholderTextColor="#94a3b8"
+                    />
+
+                    <Text style={styles.quoteFormLabel}>Observaciones de repuestos</Text>
+                    <TextInput
+                      style={[styles.quoteInput, styles.quoteInputMultiline]}
+                      value={diagnosticForm.materiales}
+                      onChangeText={(value) => actualizarCampoDiagnostico(id, "materiales", value)}
+                      placeholder="Notas para el administrador sobre repuestos"
+                      placeholderTextColor="#94a3b8"
+                      multiline
+                    />
+
+                    <Text style={styles.quoteFormLabel}>Repuestos requeridos</Text>
+                    {diagnosticForm.repuestos.map((repuesto, index) => (
+                      <View key={`${id}-diag-repuesto-${index}`} style={styles.returnBlock}>
+                        <TextInput
+                          style={styles.quoteInput}
+                          value={repuesto.nombre}
+                          onChangeText={(value) => actualizarRepuestoDiagnostico(id, index, "nombre", value)}
+                          placeholder={`Repuesto ${index + 1}`}
+                          placeholderTextColor="#94a3b8"
+                        />
+                        <TextInput
+                          style={styles.quoteInput}
+                          value={repuesto.cantidad}
+                          onChangeText={(value) => actualizarRepuestoDiagnostico(id, index, "cantidad", value)}
+                          placeholder="Cantidad"
+                          placeholderTextColor="#94a3b8"
+                          keyboardType="numeric"
+                        />
+                      </View>
+                    ))}
+
+                    <TouchableOpacity
+                      style={styles.secondaryButton}
+                      onPress={() => agregarRepuestoDiagnostico(id)}
+                    >
+                      <Text style={styles.secondaryButtonText}>Agregar repuesto</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.primaryButton}
+                      onPress={() => enviarDiagnostico(item)}
+                    >
+                      <Text style={styles.primaryButtonText}>Enviar diagnostico al admin</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : null}
+              </View>
+            ) : null}
+
+            <View style={styles.timelineCard}>
+              <Text style={styles.timelineCardTitle}>Seguimiento de la intervencion</Text>
+              {trackingSteps.map((step) => (
+                <View key={`${id}-${step.label}`} style={styles.timelineStep}>
+                  <View style={[styles.timelineIcon, step.completed && styles.timelineIconCompleted]}>
+                    <MaterialCommunityIcons
+                      name={step.completed ? "check" : "clock-outline"}
+                      size={14}
+                      color={step.completed ? "#1d4ed8" : "#64748b"}
+                    />
+                  </View>
+                  <View style={styles.timelineTextGroup}>
+                    <Text style={styles.timelineLabel}>{step.label}</Text>
+                    <Text style={styles.timelineState}>{step.completed ? "Confirmado" : "Pendiente"}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
           </View>
         ) : null}
       </TouchableOpacity>
@@ -575,7 +1259,7 @@ export default function TallerDashboard() {
           <View style={[styles.grid, isMobile && styles.gridMobile]}>
             <View style={styles.panel}>
               <Text style={styles.panelTitle}>Alertas</Text>
-              <View style={styles.simpleRow}><MaterialCommunityIcons name="bell-ring-outline" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{waitingAdminRequests.length} pendientes de respuesta al administrador</Text></View>
+              <View style={styles.simpleRow}><MaterialCommunityIcons name="bell-ring-outline" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{waitingAdminRequests.length} esperando confirmacion del cliente</Text></View>
               <View style={styles.simpleRow}><MaterialCommunityIcons name="clock-alert-outline" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{delayedRequests.length} tiempos atrasados</Text></View>
               <View style={styles.simpleRow}><MaterialCommunityIcons name="backup-restore" size={18} color="#f97316" /><Text style={styles.simpleRowText}>{returnedRequests.length} solicitudes devueltas</Text></View>
             </View>
@@ -596,33 +1280,66 @@ export default function TallerDashboard() {
     }
 
     if (selectedSection === "Solicitudes recibidas") {
+      const items = filtrarSolicitudes(requestsReceived);
       return (
         <View style={styles.panel}>
-          <Text style={styles.panelTitle}>Solicitudes recibidas</Text>
-          <Text style={styles.panelSubtitle}>Aqui llegan las solicitudes enviadas por el administrador. Desde aqui puedes aprobar el servicio con fecha y horario o rechazarlo.</Text>
-          {requestsReceived.length > 0 ? requestsReceived.map((item) => renderRequestCard(item, { showQuote: true, showReturn: true, showInfo: true })) : <Text style={styles.emptyText}>No hay solicitudes nuevas en este momento.</Text>}
+          <View style={styles.moduleHeaderCard}>
+            <View style={styles.moduleHeaderText}>
+              <Text style={styles.moduleHeaderTitle}>Modulo: Taller</Text>
+              <Text style={styles.moduleHeaderSubtitle}>Gestion de solicitudes recibidas y aprobacion inicial.</Text>
+            </View>
+            <View style={styles.moduleHeaderBadge}>
+              <MaterialCommunityIcons name="clipboard-list-outline" size={18} color="#2563eb" />
+              <Text style={styles.moduleHeaderBadgeText}>{items.length}</Text>
+            </View>
+          </View>
+          <View style={styles.sectionToolbar}>
+            <Text style={styles.sectionToolbarTitle}>Solicitudes</Text>
+            <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+              <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+            </TouchableOpacity>
+          </View>
+          {items.length > 0 ? items.map((item) => renderRequestCard(item, { showQuote: true, showReturn: true, showInfo: true })) : <Text style={styles.emptyText}>No hay solicitudes nuevas en este momento.</Text>}
         </View>
       );
     }
 
     if (selectedSection === "Diagnostico") {
+      const items = filtrarSolicitudes(diagnosticRequests);
+      const waitingItems = filtrarSolicitudes(waitingAdminRequests);
       return (
         <View style={styles.panel}>
-          <Text style={styles.panelTitle}>Pendientes de administrador</Text>
-          <Text style={styles.panelSubtitle}>Aqui ves las solicitudes aprobadas por el taller y pendientes de que el administrador envie la informacion al cliente.</Text>
-          {waitingAdminRequests.length > 0 ? waitingAdminRequests.map((item) => renderRequestCard(item, { showInfo: true })) : <Text style={styles.emptyText}>No hay respuestas pendientes para el administrador.</Text>}
+          <Text style={styles.panelTitle}>Diagnostico</Text>
+          <Text style={styles.panelSubtitle}>Cuando el cliente confirma la llegada al taller, aqui aparece el formulario de diagnostico y repuestos. Debajo veras lo que ya fue enviado al administrador.</Text>
+          <View style={styles.sectionToolbar}>
+            <Text style={styles.sectionToolbarTitle}>Solicitudes</Text>
+            <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+              <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+            </TouchableOpacity>
+          </View>
+          {items.length > 0 ? items.map((item) => renderRequestCard(item, { showDiagnosticSend: true, showInfo: true })) : <Text style={styles.emptyText}>No hay vehiculos pendientes por diagnostico.</Text>}
+          {waitingItems.length > 0 ? waitingItems.map((item) => renderRequestCard(item, { showInfo: true })) : null}
         </View>
       );
     }
 
     if (selectedSection === "Intervencion") {
-      const interventionItems = [...approvedRequests, ...inProgressRequests];
+      const interventionItems = filtrarSolicitudes(
+        dedupeWorkshopRequests([...approvedRequests, ...inProgressRequests])
+      );
       return (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Intervencion</Text>
           <Text style={styles.panelSubtitle}>Solo ingresan aqui las solicitudes aprobadas por el administrador.</Text>
+          <View style={styles.sectionToolbar}>
+            <Text style={styles.sectionToolbarTitle}>Solicitudes</Text>
+            <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+              <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+            </TouchableOpacity>
+          </View>
           {interventionItems.length > 0 ? interventionItems.map((item) => renderRequestCard(item, {
-            showStart: isApprovedStatus(item.estado),
+            showStart: ["aprobada", "repuestos_despachados"].includes(normalizeStatus(item.estado)),
+            showReceiveParts: ["repuestos_despachados", "intervencion_iniciada"].includes(normalizeStatus(item.estado)),
             showProgress: isInProcessStatus(item.estado),
             showFinish: isInProcessStatus(item.estado),
           })) : <Text style={styles.emptyText}>No hay ordenes en intervencion.</Text>}
@@ -631,7 +1348,9 @@ export default function TallerDashboard() {
     }
 
     if (selectedSection === "Materiales / Repuestos") {
-      const materialSource = [...approvedRequests, ...inProgressRequests];
+      const materialSource = filtrarSolicitudes(
+        dedupeWorkshopRequests([...approvedRequests, ...inProgressRequests])
+      );
       return (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Materiales / Repuestos</Text>
@@ -650,11 +1369,12 @@ export default function TallerDashboard() {
     }
 
     if (selectedSection === "Entrega / Informe") {
+      const items = filtrarSolicitudes(inProgressRequests);
       return (
         <View style={styles.panel}>
           <Text style={styles.panelTitle}>Entrega / Informe</Text>
           <Text style={styles.panelSubtitle}>El taller devuelve la informacion final al administrador.</Text>
-          {inProgressRequests.length > 0 ? inProgressRequests.map((item) => (
+          {items.length > 0 ? items.map((item) => (
             <View key={String(item.id)} style={styles.requestCard}>
               <Text style={styles.requestTitle}>Solicitud #{getCaseNumber(item)}</Text>
               <Text style={styles.requestSubtitle}>{getVehicleName(item)}</Text>
@@ -678,13 +1398,15 @@ export default function TallerDashboard() {
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Historial</Text>
         <Text style={styles.panelSubtitle}>Ordenes finalizadas y solicitudes devueltas.</Text>
-        {[...finishedRequests, ...returnedRequests].length > 0 ? [...finishedRequests, ...returnedRequests].map((item) => renderRequestCard(item)) : <Text style={styles.emptyText}>No hay historial disponible.</Text>}
+        {filtrarSolicitudes([...finishedRequests, ...returnedRequests]).length > 0 ? filtrarSolicitudes([...finishedRequests, ...returnedRequests]).map((item) => renderRequestCard(item)) : <Text style={styles.emptyText}>No hay historial disponible.</Text>}
       </View>
     );
   };
 
   return (
     <View style={styles.screen}>
+      {renderQuickFilterModal()}
+      {renderSchedulePickerModal()}
       {showNotifications ? (
         <View style={styles.overlayLayer} pointerEvents="box-none">
           <Pressable style={styles.overlayBackdrop} onPress={() => { setShowNotifications(false); }} />
@@ -774,6 +1496,17 @@ const styles = StyleSheet.create({
   content: { padding: 20 },
   overlayLayer: { ...StyleSheet.absoluteFillObject, zIndex: 20 },
   overlayBackdrop: { ...StyleSheet.absoluteFillObject },
+  quickFilterOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 40, justifyContent: "center", padding: 20 },
+  quickFilterBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8,18,31,0.28)" },
+  quickFilterCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: "#dbe4f0", shadowColor: "#08121f", shadowOpacity: 0.14, shadowRadius: 18, elevation: 8 },
+  quickFilterTitle: { color: "#102447", fontSize: 18, fontWeight: "800", marginBottom: 12 },
+  quickFilterLabel: { color: "#475569", fontWeight: "700", marginTop: 8, marginBottom: 8 },
+  quickFilterChipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  quickFilterChip: { backgroundColor: "#eef3f9", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 10 },
+  quickFilterChipActive: { backgroundColor: "#dbeafe" },
+  quickFilterChipText: { color: "#425066", fontWeight: "700" },
+  quickFilterChipTextActive: { color: "#1d4ed8" },
+  quickFilterActions: { flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 16 },
   topActionsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 18, zIndex: 30 },
   topActionGroup: { position: "relative" },
   iconActionButton: { width: 56, height: 56, borderRadius: 18, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#dbe4f0", alignItems: "center", justifyContent: "center", shadowColor: "#08121f", shadowOpacity: 0.08, shadowRadius: 8, elevation: 2 },
@@ -807,6 +1540,15 @@ const styles = StyleSheet.create({
   notificationItem: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#e6edf6" },
   notificationItemTitle: { color: "#08121f", fontWeight: "800" },
   panel: { backgroundColor: "#ffffff", borderRadius: 24, padding: 22, borderWidth: 1, borderColor: "#dbe4f0", flex: 1 },
+  moduleHeaderCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: "#e8edf6", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14, shadowColor: "#08121f", shadowOpacity: 0.06, shadowRadius: 12, elevation: 2 },
+  moduleHeaderText: { flex: 1, gap: 4 },
+  moduleHeaderTitle: { color: "#102447", fontSize: 18, fontWeight: "900" },
+  moduleHeaderSubtitle: { color: "#64748b", lineHeight: 18 },
+  moduleHeaderBadge: { minWidth: 44, height: 44, borderRadius: 16, backgroundColor: "#eff6ff", alignItems: "center", justifyContent: "center", gap: 2, paddingHorizontal: 8 },
+  moduleHeaderBadgeText: { color: "#1d4ed8", fontWeight: "800", fontSize: 12 },
+  sectionToolbar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
+  sectionToolbarTitle: { color: "#102447", fontSize: 17, fontWeight: "800" },
+  filterActionButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#dbe4f0", alignItems: "center", justifyContent: "center" },
   panelTitle: { color: "#08121f", fontSize: 22, fontWeight: "800" },
   panelSubtitle: { color: "#64748b", marginTop: 8, lineHeight: 22 },
   kpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
@@ -822,15 +1564,17 @@ const styles = StyleSheet.create({
   simpleInfoCard: { backgroundColor: "#f8fbff", borderRadius: 18, padding: 16, marginTop: 12, borderWidth: 1, borderColor: "#e6edf6" },
   simpleInfoTitle: { color: "#08121f", fontWeight: "800", marginBottom: 6 },
   simpleInfoText: { color: "#475569", marginTop: 4 },
-  requestCard: { backgroundColor: "#f8fbff", borderRadius: 20, padding: 16, marginTop: 14, borderWidth: 1, borderColor: "#e6edf6" },
+  requestCard: { backgroundColor: "#ffffff", borderRadius: 22, padding: 18, marginTop: 14, borderWidth: 1, borderColor: "#e6edf6", shadowColor: "#08121f", shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
   highlightedCard: { borderColor: "#2563eb", borderWidth: 2, shadowColor: "#2563eb", shadowOpacity: 0.14, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
   requestHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 },
   requestHeaderMain: { flex: 1 },
   requestTitle: { color: "#08121f", fontWeight: "800", fontSize: 18 },
   requestSubtitle: { color: "#475569", marginTop: 4, fontWeight: "700" },
-  statePill: { backgroundColor: "#eef4ff", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "#d7e4fb" },
-  statePillText: { color: "#2563eb", fontWeight: "800" },
-  metaText: { color: "#475569", marginTop: 6, fontWeight: "600" },
+  statePill: { borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1 },
+  statePillText: { fontWeight: "800" },
+  requestMetaList: { marginTop: 10, gap: 8 },
+  requestMetaRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  metaText: { color: "#475569", fontWeight: "600", flex: 1 },
   priorityPill: { alignSelf: "flex-start", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, marginTop: 12 },
   priorityText: { fontWeight: "800", textTransform: "capitalize" },
   expandHint: { color: "#64748b", marginTop: 10, fontSize: 12, fontWeight: "700" },
@@ -838,6 +1582,8 @@ const styles = StyleSheet.create({
   expandedText: { color: "#334155", marginTop: 4, lineHeight: 20 },
   infoBanner: { marginTop: 12, backgroundColor: "#eff6ff", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: "#bfdbfe", flexDirection: "row", alignItems: "flex-start", gap: 8 },
   infoBannerText: { color: "#1d4ed8", flex: 1, lineHeight: 20, fontWeight: "600" },
+  sentAvailabilityCard: { marginTop: 12, backgroundColor: "#f8fbff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#d7e4fb" },
+  sentAvailabilityTitle: { color: "#102447", fontWeight: "800", marginBottom: 4 },
   actionRow: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
   returnBlock: { flex: 1, minWidth: 220 },
   quoteFormCard: { marginTop: 14, backgroundColor: "#ffffff", borderRadius: 16, padding: 14, borderWidth: 1, borderColor: "#dbe4f0", gap: 10 },
@@ -845,6 +1591,18 @@ const styles = StyleSheet.create({
   quoteFormLabel: { color: "#334155", fontWeight: "700", marginTop: 2 },
   quoteInput: { backgroundColor: "#f8fbff", borderRadius: 14, borderWidth: 1, borderColor: "#dbe4f0", paddingHorizontal: 14, paddingVertical: 12, color: "#08121f" },
   quoteInputMultiline: { minHeight: 92, textAlignVertical: "top" },
+  webPickerShell: { backgroundColor: "#f8fbff", borderRadius: 14, borderWidth: 1, borderColor: "#dbe4f0", paddingHorizontal: 12, minHeight: 50, justifyContent: "center" },
+  pickerModalCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 18, borderWidth: 1, borderColor: "#dbe4f0", shadowColor: "#08121f", shadowOpacity: 0.14, shadowRadius: 18, elevation: 8, maxHeight: "74%" },
+  pickerScrollArea: { maxHeight: 360 },
+  pickerOptionList: { gap: 10 },
+  pickerOptionButton: { borderRadius: 16, borderWidth: 1, borderColor: "#dbe4f0", backgroundColor: "#f8fbff", paddingHorizontal: 14, paddingVertical: 14 },
+  pickerOptionButtonActive: { backgroundColor: "#dbeafe", borderColor: "#93c5fd" },
+  pickerOptionText: { color: "#334155", fontWeight: "700" },
+  pickerOptionTextActive: { color: "#1d4ed8" },
+  mobilePickerField: { backgroundColor: "#f8fbff", borderRadius: 14, borderWidth: 1, borderColor: "#dbe4f0", paddingHorizontal: 14, minHeight: 52, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  mobilePickerFieldContent: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
+  mobilePickerFieldText: { color: "#08121f", fontSize: 15, fontWeight: "600", flex: 1 },
+  mobilePickerPlaceholderText: { color: "#94a3b8", fontWeight: "500" },
   commentCounter: { marginTop: 6, marginBottom: 8, color: "#64748b", fontSize: 12, textAlign: "right" },
   primaryButton: { backgroundColor: "#2563eb", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
   primaryButtonText: { color: "#ffffff", fontWeight: "800" },
@@ -854,5 +1612,15 @@ const styles = StyleSheet.create({
   successButtonText: { color: "#ffffff", fontWeight: "800" },
   dangerButton: { backgroundColor: "#fee2e2", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#fecaca" },
   dangerButtonText: { color: "#b91c1c", fontWeight: "800" },
+  inlineActionButton: { alignSelf: "flex-start", minWidth: 160 },
+  formSubmitButton: { marginTop: 6 },
   emptyText: { color: "#94a3b8", marginTop: 14, fontStyle: "italic" },
+  timelineCard: { marginTop: 14, backgroundColor: "#f8fbff", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#d7e4fb", gap: 10 },
+  timelineCardTitle: { color: "#102447", fontWeight: "800", marginBottom: 2 },
+  timelineStep: { flexDirection: "row", alignItems: "center", gap: 12 },
+  timelineIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: "#e2e8f0", alignItems: "center", justifyContent: "center" },
+  timelineIconCompleted: { backgroundColor: "#dbeafe" },
+  timelineTextGroup: { flex: 1, gap: 2 },
+  timelineLabel: { color: "#0f172a", fontWeight: "700" },
+  timelineState: { color: "#64748b", fontSize: 12, fontWeight: "600" },
 });
