@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -55,6 +57,12 @@ type Solicitud = {
     }[];
     timeline?: Record<string, string | null>;
     confirmaciones?: Record<string, boolean | string | null>;
+    encuesta_satisfaccion?: {
+      calificacion?: number | null;
+      comentario?: string | null;
+      fecha?: string | null;
+      cliente_nombre?: string | null;
+    };
   };
 };
 
@@ -99,6 +107,23 @@ const getVehicleName = (item: Solicitud) =>
   [item.vehiculo?.marca, item.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo sin nombre";
 
 const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.solicitud_origen_id ?? item.id;
+
+const hasClientApprovedFlow = (item: Solicitud) =>
+  Boolean(item.flujo_mantenimiento?.timeline?.cliente_aprueba_propuesta_en) ||
+  ["aprobada", "repuestos_despachados", "intervencion_iniciada", "repuestos_recibidos_taller", "en_proceso", "en_reparacion", "finalizada"].includes(
+    normalizeStatus(item.estado)
+  );
+
+const hasWorkshopDiagnosticSummary = (item: Solicitud) =>
+  Boolean(
+    item.taller_diagnostico?.diagnostico ||
+    item.taller_diagnostico?.servicios ||
+    item.taller_diagnostico?.horas ||
+    item.taller_diagnostico?.materiales
+  );
+
+const isWorkshopFinalized = (item: Solicitud) =>
+  Boolean(item.flujo_mantenimiento?.confirmaciones?.taller_reparacion_finalizada);
 
 const getWorkshopPriority = (item: Solicitud) => {
   const state = normalizeStatus(item.estado);
@@ -182,12 +207,20 @@ const formatTimeFieldLabel = (value: string) => {
   if (!value) return "Seleccionar hora";
   const [hours, minutes] = value.split(":").map(Number);
   if (Number.isNaN(hours) || Number.isNaN(minutes)) return value;
-  const date = new Date();
-  date.setHours(hours, minutes, 0, 0);
-  return date.toLocaleTimeString("es-CO", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const formatHourRange = (hour: number) => {
+    const normalizedHour = ((hour % 24) + 24) % 24;
+    const period = normalizedHour < 12 ? "am" : "pm";
+    const displayHour = normalizedHour % 12 === 0 ? 12 : normalizedHour % 12;
+    return { displayHour, period };
+  };
+
+  const start = formatHourRange(hours);
+  const end = formatHourRange(hours + 2);
+  const samePeriod = start.period === end.period;
+
+  return samePeriod
+    ? `${start.displayHour}-${end.displayHour} ${start.period}`
+    : `${start.displayHour} ${start.period}-${end.displayHour} ${end.period}`;
 };
 
 const formatWorkshopDateLabel = (value?: string | null) => {
@@ -213,6 +246,7 @@ export default function TallerDashboard() {
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [selectedVehicleFilter, setSelectedVehicleFilter] = useState("Todos");
   const [selectedDateFilter, setSelectedDateFilter] = useState("Todas");
+  const [actionLoadingMessage, setActionLoadingMessage] = useState<string | null>(null);
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [openQuoteFormId, setOpenQuoteFormId] = useState<string | null>(null);
@@ -304,6 +338,7 @@ export default function TallerDashboard() {
     comentario?: string
   ) => {
     try {
+      setActionLoadingMessage("Actualizando solicitud...");
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
         method: "PATCH",
@@ -325,6 +360,8 @@ export default function TallerDashboard() {
     } catch (error) {
       console.log("error actualizando solicitud taller", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
+    } finally {
+      setActionLoadingMessage(null);
     }
   };
 
@@ -464,6 +501,7 @@ export default function TallerDashboard() {
       }));
 
     try {
+      setActionLoadingMessage("Enviando diagnostico...");
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/diagnostico-taller`, {
         method: "PATCH",
@@ -493,6 +531,8 @@ export default function TallerDashboard() {
     } catch (error) {
       console.log("error enviando diagnostico taller", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
+    } finally {
+      setActionLoadingMessage(null);
     }
   };
 
@@ -516,6 +556,7 @@ export default function TallerDashboard() {
     }
 
     try {
+      setActionLoadingMessage("Confirmando disponibilidad...");
       const token = await getToken();
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-taller`, {
         method: "PATCH",
@@ -543,6 +584,8 @@ export default function TallerDashboard() {
     } catch (error) {
       console.log("error enviando respuesta taller", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
+    } finally {
+      setActionLoadingMessage(null);
     }
   };
 
@@ -590,7 +633,11 @@ export default function TallerDashboard() {
     () =>
       dedupeWorkshopRequests(
         workshopRequests.filter((item) =>
-          ["diagnosticada", "pendiente_envio_cliente_taller", "espera_cliente"].includes(normalizeStatus(item.estado))
+          (
+            ["diagnosticada", "pendiente_envio_cliente_taller", "espera_cliente", "en_cotizacion", "cotizando", "cotizada", "propuesta_armada", "enviada_cliente"].includes(normalizeStatus(item.estado)) ||
+            hasWorkshopDiagnosticSummary(item)
+          ) &&
+          !hasClientApprovedFlow(item)
         )
       ),
     [workshopRequests]
@@ -599,6 +646,7 @@ export default function TallerDashboard() {
     () =>
       dedupeWorkshopRequests(
         workshopRequests.filter((item) =>
+          hasClientApprovedFlow(item) &&
           ["aprobada", "repuestos_despachados"].includes(normalizeStatus(item.estado))
         )
       ),
@@ -608,6 +656,7 @@ export default function TallerDashboard() {
     () =>
       dedupeWorkshopRequests(
         workshopRequests.filter((item) =>
+          !isWorkshopFinalized(item) &&
           ["intervencion_iniciada", "repuestos_recibidos_taller", "en_proceso", "en_reparacion"].includes(
             normalizeStatus(item.estado)
           )
@@ -616,7 +665,10 @@ export default function TallerDashboard() {
     [workshopRequests]
   );
   const finishedRequests = useMemo(
-    () => dedupeWorkshopRequests(workshopRequests.filter((item) => isFinishedStatus(item.estado))),
+    () =>
+      dedupeWorkshopRequests(
+        workshopRequests.filter((item) => isFinishedStatus(item.estado) || isWorkshopFinalized(item))
+      ),
     [workshopRequests]
   );
   const returnedRequests = useMemo(
@@ -702,11 +754,9 @@ export default function TallerDashboard() {
 
   const mobileTimeOptions = useMemo(() => {
     const options: { value: string; label: string }[] = [];
-    for (let hour = 6; hour <= 20; hour += 1) {
-      for (const minute of [0, 30]) {
-        const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-        options.push({ value, label: formatTimeFieldLabel(value) });
-      }
+    for (let hour = 6; hour <= 18; hour += 2) {
+      const value = `${String(hour).padStart(2, "0")}:00`;
+      options.push({ value, label: formatTimeFieldLabel(value) });
     }
     return options;
   }, []);
@@ -830,7 +880,6 @@ export default function TallerDashboard() {
       showDiagnosticSend?: boolean;
       showStart?: boolean;
       showReceiveParts?: boolean;
-      showProgress?: boolean;
       showFinish?: boolean;
       showInfo?: boolean;
     }
@@ -859,7 +908,14 @@ export default function TallerDashboard() {
       materiales: item.taller_diagnostico?.materiales || "",
       repuestos: [{ nombre: "", cantidad: "1" }],
     };
-    const statusTone = getStatusTone(item.estado);
+    const statusTone = isWorkshopFinalized(item) && !isFinishedStatus(item.estado)
+      ? {
+          label: "Finalizado por taller",
+          backgroundColor: "#dcfce7",
+          borderColor: "#86efac",
+          color: "#166534",
+        }
+      : getStatusTone(item.estado);
     const trackingSteps = [
       {
         label: "Proveedor despacho repuestos",
@@ -947,6 +1003,23 @@ export default function TallerDashboard() {
                 </Text>
               </View>
             ) : null}
+            {hasWorkshopDiagnosticSummary(item) ? (
+              <View style={styles.sentAvailabilityCard}>
+                <Text style={styles.sentAvailabilityTitle}>Diagnostico del taller</Text>
+                <Text style={styles.expandedText}>
+                  Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                </Text>
+                <Text style={styles.expandedText}>
+                  Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                </Text>
+                <Text style={styles.expandedText}>
+                  Horas estimadas: {item.taller_diagnostico?.horas || "Sin horas"}
+                </Text>
+                <Text style={styles.expandedText}>
+                  Repuestos solicitados: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.actionRow}>
               {options?.showQuote ? (
                 <TouchableOpacity
@@ -1004,11 +1077,6 @@ export default function TallerDashboard() {
                   onPress={() => actualizarEstadoSolicitud(id, "repuestos_recibidos_taller", "Los repuestos fueron recibidos por el taller.")}
                 >
                   <Text style={styles.secondaryButtonText}>Recibir repuestos</Text>
-                </TouchableOpacity>
-              ) : null}
-              {options?.showProgress ? (
-                <TouchableOpacity style={styles.secondaryButton} onPress={() => Alert.alert("Progreso", "La orden sigue en proceso.")}>
-                  <Text style={styles.secondaryButtonText}>Actualizar progreso</Text>
                 </TouchableOpacity>
               ) : null}
               {options?.showFinish ? (
@@ -1236,6 +1304,21 @@ export default function TallerDashboard() {
                 </View>
               ))}
             </View>
+
+            {item.flujo_mantenimiento?.encuesta_satisfaccion?.calificacion ? (
+              <View style={styles.timelineCard}>
+                <Text style={styles.timelineCardTitle}>Calificacion del cliente</Text>
+                <Text style={styles.expandedText}>
+                  Calificacion: {"★".repeat(Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
+                  {"☆".repeat(5 - Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
+                </Text>
+                {item.flujo_mantenimiento.encuesta_satisfaccion.comentario ? (
+                  <Text style={styles.expandedText}>
+                    Comentario: {item.flujo_mantenimiento.encuesta_satisfaccion.comentario}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
           </View>
         ) : null}
       </TouchableOpacity>
@@ -1338,10 +1421,18 @@ export default function TallerDashboard() {
             </TouchableOpacity>
           </View>
           {interventionItems.length > 0 ? interventionItems.map((item) => renderRequestCard(item, {
-            showStart: ["aprobada", "repuestos_despachados"].includes(normalizeStatus(item.estado)),
-            showReceiveParts: ["repuestos_despachados", "intervencion_iniciada"].includes(normalizeStatus(item.estado)),
-            showProgress: isInProcessStatus(item.estado),
-            showFinish: isInProcessStatus(item.estado),
+            showStart:
+              hasClientApprovedFlow(item) &&
+              !isWorkshopFinalized(item) &&
+              ["aprobada", "repuestos_despachados"].includes(normalizeStatus(item.estado)),
+            showReceiveParts:
+              hasClientApprovedFlow(item) &&
+              !isWorkshopFinalized(item) &&
+              ["repuestos_despachados", "intervencion_iniciada"].includes(normalizeStatus(item.estado)),
+            showFinish:
+              hasClientApprovedFlow(item) &&
+              !isWorkshopFinalized(item) &&
+              normalizeStatus(item.estado) === "repuestos_recibidos_taller",
           })) : <Text style={styles.emptyText}>No hay ordenes en intervencion.</Text>}
         </View>
       );
@@ -1405,6 +1496,14 @@ export default function TallerDashboard() {
 
   return (
     <View style={styles.screen}>
+      <Modal transparent visible={Boolean(actionLoadingMessage)} animationType="fade">
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={styles.loadingText}>{actionLoadingMessage || "Procesando..."}</Text>
+          </View>
+        </View>
+      </Modal>
       {renderQuickFilterModal()}
       {renderSchedulePickerModal()}
       {showNotifications ? (
@@ -1502,6 +1601,9 @@ const styles = StyleSheet.create({
   quickFilterTitle: { color: "#102447", fontSize: 18, fontWeight: "800", marginBottom: 12 },
   quickFilterLabel: { color: "#475569", fontWeight: "700", marginTop: 8, marginBottom: 8 },
   quickFilterChipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8,18,31,0.32)", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 60 },
+  loadingCard: { minWidth: 220, backgroundColor: "#ffffff", borderRadius: 22, padding: 20, alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#dbe4f0" },
+  loadingText: { color: "#102447", fontWeight: "800", textAlign: "center" },
   quickFilterChip: { backgroundColor: "#eef3f9", borderRadius: 999, paddingHorizontal: 14, paddingVertical: 10 },
   quickFilterChipActive: { backgroundColor: "#dbeafe" },
   quickFilterChipText: { color: "#425066", fontWeight: "700" },

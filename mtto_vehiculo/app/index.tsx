@@ -19,6 +19,8 @@ import storage from "../constants/storage";
 
 const loginGarageBackground = require("../assets/images/login-garage-luxury.png");
 
+const sanitizePassword = (value: string) => value.replace(/\u0000/g, "").replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+
 export default function Login() {
   const router = useRouter();
   const { width } = useWindowDimensions();
@@ -54,6 +56,13 @@ export default function Login() {
   async function handleLogin() {
     try {
       const normalizedEmail = email.trim().toLowerCase();
+      const normalizedPassword = sanitizePassword(password);
+
+      if (!normalizedPassword) {
+        alert("Debes ingresar una contrasena valida");
+        return;
+      }
+
       const response = await fetch(`${API_BASE_URL}/login`, {
         method: "POST",
         headers: {
@@ -61,7 +70,7 @@ export default function Login() {
         },
         body: JSON.stringify({
           email: normalizedEmail,
-          password,
+          password: normalizedPassword,
         }),
       });
 
@@ -148,7 +157,7 @@ export default function Login() {
                   secureTextEntry={!showPassword}
                   style={[styles.input, isCompact && styles.inputCompact]}
                   value={password}
-                  onChangeText={setPassword}
+                  onChangeText={(value) => setPassword(sanitizePassword(value))}
                 />
                 <TouchableOpacity onPress={() => setShowPassword((current) => !current)}>
                   <MaterialCommunityIcons

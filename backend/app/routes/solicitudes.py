@@ -18,6 +18,7 @@ from app.models.vehiculo import Vehiculo
 from app.schemas.solicitud import (
     SolicitudAdministradorOmitirCotizacion,
     SolicitudClienteAprobacion,
+    SolicitudClienteFinalizacion,
     SolicitudAdministradorDevolucion,
     SolicitudCotizacionUpdate,
     SolicitudCreate,
@@ -578,6 +579,15 @@ def resolve_estado_post_confirmacion_proveedor(
     return estado_solicitado
 
 
+def solicitud_mantenimiento_finalizada_por_cliente(solicitud: Solicitud) -> bool:
+    if not es_solicitud_mantenimiento_taller(solicitud.tipo):
+        return normalizar_servicio(solicitud.estado) in {"finalizada", "finalizado"}
+
+    flujo_mantenimiento = ensure_flujo_mantenimiento(solicitud)
+    timeline = flujo_mantenimiento.get("timeline", {})
+    return bool(timeline.get("cliente_finaliza_servicio_en"))
+
+
 def hydrate_respuestas_desde_campos(
     proveedores_estado: list[dict],
     marcas: list[str],
@@ -749,6 +759,15 @@ def sincronizar_solicitud_raiz_con_hija(db: Session, solicitud: Solicitud) -> No
     if not solicitud_raiz:
         return
 
+    # No sincronizar el estado cuando el taller marca reparacion finalizada
+    # para evitar que el cliente vea un estado incorrecto
+    flujo_actual = ensure_flujo_mantenimiento(solicitud)
+    confirmaciones = flujo_actual.get("confirmaciones", {})
+    if confirmaciones.get("taller_reparacion_finalizada"):
+        # Solo sincronizar el flujo_mantenimiento, no el estado
+        guardar_flujo_mantenimiento(solicitud_raiz, flujo_actual)
+        return
+
     solicitud_raiz.estado = solicitud.estado
     solicitud_raiz.proveedor_cotizo_id = solicitud.proveedor_cotizo_id
     solicitud_raiz.proveedores_ids = solicitud.proveedores_ids
@@ -760,7 +779,7 @@ def sincronizar_solicitud_raiz_con_hija(db: Session, solicitud: Solicitud) -> No
     solicitud_raiz.precio = solicitud.precio
     solicitud_raiz.observacion = solicitud.observacion
     solicitud_raiz.comentario_proveedor = solicitud.comentario_proveedor
-    solicitud_raiz.flujo_mantenimiento = solicitud.flujo_mantenimiento
+    guardar_flujo_mantenimiento(solicitud_raiz, flujo_actual)
 
 
 def obtener_etiqueta_caso(solicitud: Solicitud) -> str:
@@ -1086,7 +1105,11 @@ def actualizar_estado_solicitud(
                 detail="Esta solicitud no fue aprobada para este proveedor",
             )
 
-        estados_validos_proveedor = {"espera_cliente", "en_reparacion", "finalizada", "repuestos_despachados"}
+        estados_validos_proveedor = (
+            {"repuestos_despachados"}
+            if es_mantenimiento_taller
+            else {"espera_cliente", "en_reparacion", "finalizada", "repuestos_despachados"}
+        )
         if data.estado not in estados_validos_proveedor:
             raise HTTPException(
                 status_code=403,
@@ -1126,11 +1149,15 @@ def actualizar_estado_solicitud(
             solicitud.observacion = comentario
 
     previous_status = solicitud.estado
-    solicitud.estado = (
-        resolve_estado_post_confirmacion_proveedor(solicitud.estado, data.estado)
-        if user["rol"] == "proveedor"
-        else data.estado
-    )
+    requested_status = data.estado
+    if user["rol"] == "proveedor":
+        solicitud.estado = resolve_estado_post_confirmacion_proveedor(solicitud.estado, requested_status)
+    elif user["rol"] == "taller" and requested_status == "finalizada":
+        # El cierre del taller no cambia el estado visible al cliente.
+        # Se mantiene el estado actual (puede ser "aprobada" u otro).
+        pass  # No se modifica el estado
+    else:
+        solicitud.estado = requested_status
     numero_caso = obtener_numero_caso(solicitud)
 
     if user["rol"] == "proveedor":
@@ -1281,13 +1308,13 @@ def actualizar_estado_solicitud(
                     if data.estado == "intervencion_iniciada"
                     else "El proveedor, el cliente y el administrador ya fueron informados de la recepcion."
                     if data.estado == "repuestos_recibidos_taller"
-                    else "El cliente puede revisar la finalizacion del servicio."
+                    else "El cliente debe confirmar la finalizacion del servicio para cerrar la solicitud."
                 ),
             ),
         )
 
     cliente_recipient = get_user_recipient(db, solicitud.usuario_id)
-    if cliente_recipient:
+    if cliente_recipient and previous_status != solicitud.estado:
         notification_service.notify_solicitud_status_changed(
             db,
             solicitud,
@@ -1300,6 +1327,96 @@ def actualizar_estado_solicitud(
     db.refresh(solicitud)
 
     return {"mensaje": "estado actualizado", "id": solicitud.id, "estado": solicitud.estado}
+
+
+@router.patch("/solicitudes/{solicitud_id}/finalizar-cliente")
+def finalizar_solicitud_cliente(
+    solicitud_id: int,
+    data: SolicitudClienteFinalizacion,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["rol"] != "cliente":
+        raise HTTPException(status_code=403, detail="Solo el cliente puede finalizar la solicitud")
+
+    solicitud = (
+        db.query(Solicitud)
+        .filter(Solicitud.id == solicitud_id, Solicitud.usuario_id == user["id"])
+        .first()
+    )
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    solicitud_raiz = obtener_solicitud_raiz(db, solicitud)
+    flujo_mantenimiento = ensure_flujo_mantenimiento(solicitud_raiz)
+    confirmaciones = flujo_mantenimiento.setdefault("confirmaciones", {})
+    timeline = flujo_mantenimiento.setdefault("timeline", {})
+
+    if not confirmaciones.get("taller_reparacion_finalizada"):
+        raise HTTPException(
+            status_code=400,
+            detail="El taller aun no ha marcado la reparacion como finalizada",
+        )
+
+    flujo_mantenimiento["encuesta_satisfaccion"] = {
+        "calificacion": data.calificacion,
+        "comentario": (data.comentario or "").strip() or None,
+        "fecha": ahora_iso(),
+        "cliente_id": user["id"],
+        "cliente_nombre": user["nombre"],
+    }
+    timeline["cliente_finaliza_servicio_en"] = ahora_iso()
+    guardar_flujo_mantenimiento(solicitud_raiz, flujo_mantenimiento)
+    solicitud_raiz.estado = "finalizada"
+    if solicitud.id != solicitud_raiz.id:
+        solicitud.estado = "finalizada"
+
+    finalizar_solicitudes_hijas(
+        db,
+        obtener_solicitud_raiz_id(solicitud_raiz),
+        estado="finalizada",
+    )
+
+    numero_caso = obtener_numero_caso(solicitud_raiz)
+    asunto_correo = obtener_asunto_correo_solicitud(solicitud_raiz)
+    notification_service.notify_users(
+        db,
+        combinar_destinatarios(
+            get_role_recipients(db, "administrador"),
+            [
+                recipient
+                for recipient in (
+                    get_user_recipient(db, taller_id)
+                    for taller_id in get_taller_ids_for_solicitud(solicitud_raiz)
+                )
+                if recipient is not None
+            ],
+            get_user_recipient(db, solicitud_raiz.usuario_id),
+        ),
+        f"Solicitud #{numero_caso} finalizada por cliente",
+        f"El cliente {user['nombre']} finalizo la solicitud #{numero_caso}.",
+        "finalizacion_cliente",
+        email_subject=asunto_correo,
+        email_template="maintenance_flow_notification",
+        email_context=build_flow_email_context(
+            solicitud_raiz,
+            numero_caso,
+            etapa="Solicitud finalizada por cliente",
+            mensaje=f"El cliente {user['nombre']} confirmo la finalizacion de la solicitud #{numero_caso}.",
+            actor=user["nombre"],
+            accion_requerida="La solicitud queda cerrada para cliente y administrador.",
+            detalle_adicional=f"Calificacion del cliente: {data.calificacion}/5",
+        ),
+    )
+
+    db.commit()
+    db.refresh(solicitud_raiz)
+
+    return {
+        "mensaje": "solicitud finalizada por el cliente",
+        "id": solicitud_raiz.id,
+        "estado": solicitud_raiz.estado,
+    }
 
 
 @router.patch("/solicitudes/{solicitud_id}/diagnostico-taller")

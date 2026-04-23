@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -18,6 +20,7 @@ import { API_BASE_URL } from "../../constants/api";
 import { formatCurrency, formatDateTime, formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
 import {
   getStatusLabel,
+  isApprovedStatus,
   isCancelledStatus,
   isCreatedStatus,
   isDiagnosedStatus,
@@ -105,6 +108,12 @@ type Solicitud = {
     }[];
     timeline?: Record<string, string | null>;
     confirmaciones?: Record<string, boolean | string | null>;
+    encuesta_satisfaccion?: {
+      calificacion?: number | null;
+      comentario?: string | null;
+      fecha?: string | null;
+      cliente_nombre?: string | null;
+    };
   };
   respuesta_taller?: {
     comentario?: string | null;
@@ -313,6 +322,9 @@ export default function Dashboard() {
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const [serviceStatusFilter, setServiceStatusFilter] = useState<string>("Todos");
   const [newKilometraje, setNewKilometraje] = useState("");
+  const [actionLoadingMessage, setActionLoadingMessage] = useState<string | null>(null);
+  const [surveyRequestId, setSurveyRequestId] = useState<string | null>(null);
+  const [surveyRating, setSurveyRating] = useState<number>(0);
 
   const redirigirAlLogin = () => {
     if (Platform.OS === "web") {
@@ -479,7 +491,7 @@ export default function Dashboard() {
   const filteredSolicitudesActivas = (serviceStatusFilter === "Todos"
     ? solicitudesActivas
     : solicitudesActivas.filter(
-        (item) => renderEstadoServicio(item.estado).label === serviceStatusFilter
+        (item) => renderEstadoServicio(item).label === serviceStatusFilter
       )).sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
 
   const extraerSolicitudId = (mensaje?: string) => {
@@ -575,24 +587,26 @@ export default function Dashboard() {
 
   const eliminarVehiculo = async (vehicleId: string | number) => {
     try {
-      const token = await storage.getItem("token");
+      await withActionLoading("Eliminando vehiculo...", async () => {
+        const token = await storage.getItem("token");
 
-      const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          alert("No se pudo eliminar el vehiculo" + (data ? `: ${JSON.stringify(data)}` : ""));
+          return;
+        }
+
+        await cargarDatos();
+        setSelectedVehicleId(null);
+        alert("Vehiculo eliminado correctamente");
       });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        alert("No se pudo eliminar el vehiculo" + (data ? `: ${JSON.stringify(data)}` : ""));
-        return;
-      }
-
-      await cargarDatos();
-      setSelectedVehicleId(null);
-      alert("Vehiculo eliminado correctamente");
     } catch (error) {
       console.log("Error eliminando vehiculo", error);
       alert("Error eliminando el vehiculo");
@@ -661,29 +675,31 @@ export default function Dashboard() {
     }
 
     try {
-      const token = await storage.getItem("token");
+      await withActionLoading("Actualizando kilometraje...", async () => {
+        const token = await storage.getItem("token");
 
-      const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}/kilometraje`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          kilometraje: value,
-        }),
+        const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}/kilometraje`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            kilometraje: value,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert("No se pudo actualizar el kilometraje" + (data?.detail ? `: ${data.detail}` : ""));
+          return;
+        }
+
+        setEditingVehicleId(null);
+        await cargarDatos();
+        alert("Kilometraje actualizado correctamente");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        alert("No se pudo actualizar el kilometraje" + (data?.detail ? `: ${data.detail}` : ""));
-        return;
-      }
-
-      setEditingVehicleId(null);
-      await cargarDatos();
-      alert("Kilometraje actualizado correctamente");
     } catch (error) {
       console.log("Error actualizando kilometraje", error);
       alert("Error conectando con el servidor");
@@ -697,31 +713,33 @@ export default function Dashboard() {
     }
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          vehiculo_id: Number(vehicle.id),
-          tipo: serviceTitle.replace("\n", " "),
-          descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
-          disponibilidad_cliente: "Por coordinar con el cliente",
-        }),
+      await withActionLoading("Creando solicitud...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            vehiculo_id: Number(vehicle.id),
+            tipo: serviceTitle.replace("\n", " "),
+            descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
+            disponibilidad_cliente: "Por coordinar con el cliente",
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert("No se pudo crear la solicitud" + (data?.detail ? `: ${data.detail}` : ""));
+          return;
+        }
+
+        await cargarDatos();
+        setSelectedSection("Panel de control");
+        alert("Solicitud enviada al administrador correctamente");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        alert("No se pudo crear la solicitud" + (data?.detail ? `: ${data.detail}` : ""));
-        return;
-      }
-
-      await cargarDatos();
-      setSelectedSection("Panel de control");
-      alert("Solicitud enviada al administrador correctamente");
     } catch (error) {
       console.log("Error creando solicitud rapida", error);
       alert("Error conectando con el servidor");
@@ -920,9 +938,21 @@ export default function Dashboard() {
     </View>
   );
 
-  function renderEstadoServicio(estado?: string) {
+  function renderEstadoServicio(itemOrEstado?: Solicitud | string) {
+    const item =
+      typeof itemOrEstado === "object" && itemOrEstado != null ? itemOrEstado : undefined;
+    const estado = typeof itemOrEstado === "string" ? itemOrEstado : item?.estado;
     const normalizado = normalizeStatus(estado);
+    const esMantenimientoConAprobacionClientePendiente =
+      Boolean(item?.flujo_mantenimiento?.timeline?.cliente_aprueba_propuesta_en) &&
+      !Boolean(item?.flujo_mantenimiento?.timeline?.cliente_finaliza_servicio_en) &&
+      !isFinishedStatus(normalizado);
+
     let label = getStatusLabel(normalizado);
+
+    if (esMantenimientoConAprobacionClientePendiente) {
+      label = "Aprobada";
+    }
 
     if (normalizado === "en_asignacion_taller") {
       label = "En asignacion de taller";
@@ -959,7 +989,8 @@ export default function Dashboard() {
       isProposalReadyStatus(normalizado) ||
       isSentToClientStatus(normalizado) ||
       normalizado === "aprobada" ||
-      isWaitingClientStatus(normalizado)
+      isWaitingClientStatus(normalizado) ||
+      esMantenimientoConAprobacionClientePendiente
     ) {
       return { label, backgroundColor: "#dcfce7", color: "#15803d" };
     }
@@ -1110,10 +1141,34 @@ export default function Dashboard() {
     );
   };
 
+  const solicitudPermiteFinalizacionCliente = (item: Solicitud) => {
+    const confirmaciones = item.flujo_mantenimiento?.confirmaciones || {};
+    const timeline = item.flujo_mantenimiento?.timeline || {};
+    const estado = normalizeStatus(item.estado);
+    const haAprobado = Boolean(timeline.cliente_aprueba_propuesta_en) || isApprovedStatus(estado);
+    const tallerFinalizo = Boolean(confirmaciones.taller_reparacion_finalizada);
+    return (
+      esSolicitudMantenimiento(item.tipo_servicio) &&
+      haAprobado &&
+      tallerFinalizo &&
+      !isFinishedStatus(item.estado)
+    );
+  };
+
+  const withActionLoading = async <T,>(message: string, action: () => Promise<T>) => {
+    try {
+      setActionLoadingMessage(message);
+      return await action();
+    } finally {
+      setActionLoadingMessage(null);
+    }
+  };
+
   const aprobarSolicitudCliente = async (solicitudId: string | number | undefined) => {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Aprobando solicitud...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/aprobar-cliente`, {
         method: "PATCH",
@@ -1131,6 +1186,7 @@ export default function Dashboard() {
 
       await cargarDatos();
       Alert.alert("Aprobada", "La solicitud fue aprobada y se notifico al administrador, taller y proveedor.");
+      });
     } catch (error) {
       console.log("Error aprobando solicitud cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -1141,6 +1197,7 @@ export default function Dashboard() {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Rechazando solicitud...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/rechazar-oferta-cliente`, {
         method: "PATCH",
@@ -1158,6 +1215,7 @@ export default function Dashboard() {
 
       await cargarDatos();
       Alert.alert("Oferta rechazada", "La oferta fue rechazada y se oculto del cliente.");
+      });
     } catch (error) {
       console.log("Error rechazando oferta cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -1168,6 +1226,7 @@ export default function Dashboard() {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Confirmando llegada al taller...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/llegada-taller`, {
         method: "PATCH",
@@ -1185,8 +1244,48 @@ export default function Dashboard() {
 
       await cargarDatos();
       Alert.alert("Llegada confirmada", "El taller ya puede iniciar el diagnostico.");
+      });
     } catch (error) {
       console.log("Error confirmando llegada al taller", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
+  };
+
+  const finalizarSolicitudCliente = async (solicitudId: string | number | undefined) => {
+    if (solicitudId == null) return;
+    if (!surveyRating) {
+      Alert.alert("Calificacion requerida", "Debes seleccionar una calificacion para finalizar.");
+      return;
+    }
+
+    try {
+      await withActionLoading("Finalizando servicio...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/finalizar-cliente`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            calificacion: surveyRating,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo finalizar la solicitud");
+          return;
+        }
+
+        setSurveyRequestId(null);
+        setSurveyRating(0);
+        await cargarDatos();
+        Alert.alert("Servicio finalizado", "Gracias por confirmar la finalizacion del servicio.");
+      });
+    } catch (error) {
+      console.log("Error finalizando solicitud cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
     }
   };
@@ -1319,7 +1418,7 @@ export default function Dashboard() {
           </TouchableOpacity>
         </View>
         {filteredSolicitudesActivas.map((item) => {
-          const estadoInfo = renderEstadoServicio(item.estado);
+          const estadoInfo = renderEstadoServicio(item);
           const respuestasCliente = obtenerRespuestasCliente(item);
           const expanded = expandedServiceId === String(item.id);
           const mostrarTalleres = false;
@@ -1479,6 +1578,18 @@ export default function Dashboard() {
                 </TouchableOpacity>
               ) : null}
 
+              {expanded && solicitudPermiteFinalizacionCliente(item) ? (
+                <TouchableOpacity
+                  style={styles.payButton}
+                  onPress={() => {
+                    setSurveyRequestId(String(item.accion_solicitud_id || item.id));
+                    setSurveyRating(0);
+                  }}
+                >
+                  <Text style={styles.payButtonText}>Finalizar servicio</Text>
+                </TouchableOpacity>
+              ) : null}
+
               {expanded && esSolicitudMantenimiento(item.tipo_servicio) && item.flujo_mantenimiento?.repuestos_solicitados?.length ? (
                 <View style={styles.workshopListCard}>
                   <Text style={styles.workshopListTitle}>Repuestos solicitados</Text>
@@ -1487,6 +1598,29 @@ export default function Dashboard() {
                       {(repuesto.nombre || "Repuesto").trim()} x{repuesto.cantidad || 0}
                     </Text>
                   ))}
+                </View>
+              ) : null}
+
+              {expanded &&
+              isDiagnosedStatus(item.estado) &&
+              (item.taller_diagnostico?.diagnostico ||
+                item.taller_diagnostico?.servicios ||
+                item.taller_diagnostico?.horas ||
+                item.taller_diagnostico?.materiales) ? (
+                <View style={styles.clientQuoteDiagnosticBlock}>
+                  <Text style={styles.clientQuoteDiagnosticTitle}>Diagnostico del taller</Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Horas: {item.taller_diagnostico?.horas || "Sin horas"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Materiales: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                  </Text>
                 </View>
               ) : null}
 
@@ -1559,6 +1693,16 @@ export default function Dashboard() {
                       </View>
                     </View>
                   ))}
+                </View>
+              ) : null}
+
+              {expanded && item.flujo_mantenimiento?.encuesta_satisfaccion?.calificacion ? (
+                <View style={styles.clientQuoteCard}>
+                  <Text style={styles.clientQuoteTitle}>Calificacion registrada</Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Calificacion: {"★".repeat(Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
+                    {"☆".repeat(5 - Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
+                  </Text>
                 </View>
               ) : null}
             </TouchableOpacity>
@@ -1651,6 +1795,44 @@ export default function Dashboard() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <Modal transparent visible={Boolean(actionLoadingMessage)} animationType="fade">
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={styles.loadingText}>{actionLoadingMessage || "Procesando..."}</Text>
+          </View>
+        </View>
+      </Modal>
+      <Modal transparent visible={Boolean(surveyRequestId)} animationType="fade">
+        <View style={styles.loadingOverlay}>
+          <View style={styles.surveyCard}>
+            <Text style={styles.surveyTitle}>Encuesta de satisfaccion</Text>
+            <Text style={styles.surveyText}>¿Como calificas el servicio recibido?</Text>
+            <View style={styles.surveyStarsRow}>
+              {[1, 2, 3, 4, 5].map((value) => (
+                <TouchableOpacity key={value} onPress={() => setSurveyRating(value)}>
+                  <MaterialCommunityIcons
+                    name={value <= surveyRating ? "star" : "star-outline"}
+                    size={32}
+                    color={value <= surveyRating ? "#f59e0b" : "#94a3b8"}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.surveyActions}>
+              <TouchableOpacity style={styles.kmCancelButton} onPress={() => setSurveyRequestId(null)}>
+                <Text style={styles.kmCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.kmSaveButton}
+                onPress={() => finalizarSolicitudCliente(surveyRequestId)}
+              >
+                <Text style={styles.kmSaveText}>Enviar y finalizar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <View style={styles.dashboardLayout}>
         <View style={styles.mainContent}>
           <View style={styles.menuWrapper}>
@@ -2798,5 +2980,52 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     marginLeft: 6,
     fontSize: 13,
+  },
+  loadingOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  loadingCard: {
+    minWidth: 220,
+    backgroundColor: "#ffffff",
+    borderRadius: 20,
+    padding: 20,
+    alignItems: "center",
+    gap: 12,
+  },
+  loadingText: {
+    color: "#0f172a",
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  surveyCard: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 20,
+    gap: 14,
+  },
+  surveyTitle: {
+    color: "#0f172a",
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  surveyText: {
+    color: "#475569",
+    lineHeight: 20,
+  },
+  surveyStarsRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 8,
+  },
+  surveyActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
   },
 });

@@ -7,6 +7,7 @@ import storage from "../../constants/storage";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PROVIDER_SPECIALTIES = ["llantas", "bateria", "cambio de aceite", "general"] as const;
+const sanitizePassword = (value: string) => value.replace(/\u0000/g, "").replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 
 export default function RegisterProveedor() {
   const [nombre, setNombre] = useState("");
@@ -33,6 +34,12 @@ export default function RegisterProveedor() {
       const normalizedEmail = email.trim().toLowerCase();
       const normalizedNombre = nombre.trim();
       const normalizedTelefono = telefono.trim();
+      const normalizedPassword = sanitizePassword(password);
+
+      if (!normalizedPassword) {
+        Alert.alert("Error", "Debes ingresar una contrasena valida");
+        return;
+      }
 
       const registerResponse = await fetch(`${API_BASE_URL}/proveedores/register`, {
         method: "POST",
@@ -43,7 +50,7 @@ export default function RegisterProveedor() {
           nombre: normalizedNombre,
           email: normalizedEmail,
           telefono: normalizedTelefono,
-          password,
+          password: normalizedPassword,
           rol: "proveedor",
           especialidad: especialidades,
         }),
@@ -63,7 +70,7 @@ export default function RegisterProveedor() {
         },
         body: JSON.stringify({
           email: normalizedEmail,
-          password,
+          password: normalizedPassword,
         }),
       });
 
@@ -144,7 +151,7 @@ export default function RegisterProveedor() {
           })}
         </View>
       </View>
-      <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} onChangeText={setPassword} />
+      <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} value={password} onChangeText={(value) => setPassword(sanitizePassword(value))} />
 
       <TouchableOpacity style={styles.button} onPress={registrar}>
         <Text style={styles.buttonText}>Crear cuenta</Text>

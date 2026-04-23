@@ -67,3 +67,8 @@ class SolicitudAdministradorOmitirCotizacion(BaseModel):
 
 class SolicitudClienteAprobacion(BaseModel):
     comentario: str | None = Field(default=None, max_length=300)
+
+
+class SolicitudClienteFinalizacion(BaseModel):
+    calificacion: int = Field(..., ge=1, le=5)
+    comentario: str | None = Field(default=None, max_length=300)

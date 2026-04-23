@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -50,6 +52,11 @@ type Solicitud = {
   cliente?: {
     nombre?: string;
   };
+  proveedores_estado?: {
+    id?: number | string | null;
+    estado?: string | null;
+    comentario?: string | null;
+  }[];
   cotizacion?: {
     proveedor_id?: number | string | null;
     marca?: string | null;
@@ -68,6 +75,7 @@ type Solicitud = {
       nombre?: string | null;
       cantidad?: number | null;
     }[];
+    timeline?: Record<string, string | null>;
     confirmaciones?: Record<string, boolean | string | null>;
   };
 };
@@ -121,6 +129,51 @@ const emptyForm = (): QuoteFormState => ({
 });
 
 const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.id;
+
+const parseUserIdFromToken = (token?: string | null) => {
+  if (!token) return null;
+
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    if (typeof globalThis.atob !== "function") return null;
+
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = globalThis.atob(padded);
+    const data = JSON.parse(decoded);
+    const id = Number(data?.id);
+    return Number.isFinite(id) ? id : null;
+  } catch (error) {
+    console.log("No se pudo leer el id del proveedor desde el token", error);
+    return null;
+  }
+};
+
+const getProviderResponseState = (item: Solicitud, providerId?: number | null) => {
+  if (!providerId) return null;
+
+  const providerState = (item.proveedores_estado || []).find(
+    (provider) => String(provider.id) === String(providerId)
+  );
+
+  return normalizeStatus(providerState?.estado);
+};
+
+const hasProviderFinishedQuotation = (item: Solicitud, providerId?: number | null) => {
+  const providerState = getProviderResponseState(item, providerId);
+  return providerState === "cotizado" || providerState === "devuelto";
+};
+
+const isSelectedProviderForOrder = (item: Solicitud, providerId?: number | null) => {
+  if (!providerId) return false;
+  return String(item.cotizacion?.proveedor_id ?? "") === String(providerId);
+};
+
+const hasClientApprovedFlow = (item: Solicitud) =>
+  Boolean(item.flujo_mantenimiento?.timeline?.cliente_aprueba_propuesta_en) ||
+  isApprovedStatus(item.estado) ||
+  isInProcessStatus(item.estado);
 
 const getProviderRequestPriority = (item: Solicitud) => {
   const status = normalizeStatus(item.estado);
@@ -179,6 +232,17 @@ export default function ProviderDashboardScreen() {
   const [returnComment, setReturnComment] = useState("");
   const [orderComments, setOrderComments] = useState<Record<string, string>>({});
   const [uploadedExcelDocs, setUploadedExcelDocs] = useState<Record<string, UploadedExcelState>>({});
+  const [providerId, setProviderId] = useState<number | null>(null);
+  const [actionLoadingMessage, setActionLoadingMessage] = useState<string | null>(null);
+
+  const withActionLoading = async <T,>(message: string, action: () => Promise<T>) => {
+    try {
+      setActionLoadingMessage(message);
+      return await action();
+    } finally {
+      setActionLoadingMessage(null);
+    }
+  };
 
   const redirigirAlLogin = () => {
     if (Platform.OS === "web") {
@@ -253,7 +317,9 @@ export default function ProviderDashboardScreen() {
   useEffect(() => {
     const loadUser = async () => {
       const name = await storage.getItem("user_name");
+      const token = await storage.getItem("token");
       if (name) setProviderName(name);
+      setProviderId(parseUserIdFromToken(token));
     };
 
     loadUser();
@@ -261,6 +327,7 @@ export default function ProviderDashboardScreen() {
 
   useFocusEffect(
     React.useCallback(() => {
+      setActionLoadingMessage(null);
       cargarSolicitudes();
       cargarNotificaciones();
 
@@ -280,17 +347,21 @@ export default function ProviderDashboardScreen() {
   }, [isMobile]);
 
   const cotizaciones = useMemo(
-    () => dedupeProviderRequests(solicitudes).filter((item) => isInQuotationStatus(item.estado)),
-    [solicitudes]
+    () =>
+      dedupeProviderRequests(solicitudes).filter(
+        (item) => isInQuotationStatus(item.estado) && !hasProviderFinishedQuotation(item, providerId)
+      ),
+    [providerId, solicitudes]
   );
 
   const pedidos = useMemo(
     () =>
       dedupeProviderRequests(solicitudes).filter((item) =>
-        (isApprovedStatus(item.estado) || isWaitingClientStatus(item.estado) || isInProcessStatus(item.estado)) &&
+        isSelectedProviderForOrder(item, providerId) &&
+        hasClientApprovedFlow(item) &&
         !item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
       ).sort((a, b) => Number(b.id || 0) - Number(a.id || 0)),
-    [solicitudes]
+    [providerId, solicitudes]
   );
 
   const entregas = useMemo(
@@ -299,9 +370,10 @@ export default function ProviderDashboardScreen() {
         isQuotedStatus(item.estado) ||
         isFinishedStatus(item.estado) ||
         isRejectedProviderStatus(item.estado) ||
+        hasProviderFinishedQuotation(item, providerId) ||
         Boolean(item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado)
       ),
-    [solicitudes]
+    [providerId, solicitudes]
   );
 
   const unreadNotifications = useMemo(
@@ -428,6 +500,14 @@ export default function ProviderDashboardScreen() {
       console.log("Error seleccionando documento Excel", error);
       Alert.alert("Error", "No se pudo cargar el archivo de Excel.");
     }
+  };
+
+  const eliminarDocumentoExcel = (solicitudId: string) => {
+    setUploadedExcelDocs((current) => {
+      const next = { ...current };
+      delete next[solicitudId];
+      return next;
+    });
   };
 
   const abrirFormularioCotizacion = (item: Solicitud) => {
@@ -559,32 +639,34 @@ export default function ProviderDashboardScreen() {
     };
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-proveedor`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
+      await withActionLoading("Enviando cotizacion...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-proveedor`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion");
+          return;
+        }
+
+        setExpandedQuoteId(null);
+        setQuoteForms([emptyForm()]);
+        setUploadedExcelDocs((current) => {
+          const next = { ...current };
+          delete next[String(solicitudId)];
+          return next;
+        });
+        await cargarSolicitudes();
+        Alert.alert("Enviado", "La cotizacion fue enviada al administrador.");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion");
-        return;
-      }
-
-      setExpandedQuoteId(null);
-      setQuoteForms([emptyForm()]);
-      setUploadedExcelDocs((current) => {
-        const next = { ...current };
-        delete next[String(solicitudId)];
-        return next;
-      });
-      await cargarSolicitudes();
-      Alert.alert("Enviado", "La cotizacion fue enviada al administrador.");
     } catch (error) {
       console.log("Error enviando cotizacion", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -600,28 +682,30 @@ export default function ProviderDashboardScreen() {
     }
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/devolver-proveedor`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ comentario: returnComment.trim() }),
+      await withActionLoading("Devolviendo solicitud...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/devolver-proveedor`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ comentario: returnComment.trim() }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo devolver la solicitud");
+          return;
+        }
+
+        setReturningQuoteId(null);
+        setReturnComment("");
+        setExpandedQuoteId(null);
+        await cargarSolicitudes();
+        Alert.alert("Devuelta", "La solicitud fue devuelta al administrador.");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo devolver la solicitud");
-        return;
-      }
-
-      setReturningQuoteId(null);
-      setReturnComment("");
-      setExpandedQuoteId(null);
-      await cargarSolicitudes();
-      Alert.alert("Devuelta", "La solicitud fue devuelta al administrador.");
     } catch (error) {
       console.log("Error devolviendo solicitud", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -636,26 +720,28 @@ export default function ProviderDashboardScreen() {
     if (solicitudId == null) return;
 
     try {
-      const comentario = (orderComments[String(solicitudId)] || "").trim();
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ estado, comentario }),
+      await withActionLoading("Actualizando pedido...", async () => {
+        const comentario = (orderComments[String(solicitudId)] || "").trim();
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ estado, comentario }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo actualizar el pedido");
+          return;
+        }
+
+        await cargarSolicitudes();
+        Alert.alert("Actualizado", successMessage);
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo actualizar el pedido");
-        return;
-      }
-
-      await cargarSolicitudes();
-      Alert.alert("Actualizado", successMessage);
     } catch (error) {
       console.log("Error actualizando estado proveedor", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -786,6 +872,14 @@ export default function ProviderDashboardScreen() {
       style={styles.screen}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
+    <Modal transparent visible={Boolean(actionLoadingMessage)} animationType="fade">
+      <View style={styles.loadingOverlay}>
+        <View style={styles.loadingCard}>
+          <ActivityIndicator size="large" color="#2563eb" />
+          <Text style={styles.loadingText}>{actionLoadingMessage || "Procesando..."}</Text>
+        </View>
+      </View>
+    </Modal>
     {renderQuickFilterModal()}
     <ScrollView
       style={styles.screen}
@@ -955,6 +1049,7 @@ export default function ProviderDashboardScreen() {
                     item.flujo_mantenimiento
                   );
                   const excelDoc = uploadedExcelDocs[String(item.id)];
+                  const hasUploadedExcel = Boolean(excelDoc?.base64);
 
                   return (
                     <View key={String(item.id)} style={styles.orderCard}>
@@ -1001,13 +1096,40 @@ export default function ProviderDashboardScreen() {
                                   : "Sin detalle"}
                               </Text>
                               {!isQuoted ? (
-                                <TouchableOpacity
-                                  style={styles.addFormButton}
-                                  onPress={() => seleccionarDocumentoExcel(String(item.id))}
-                                >
-                                  <MaterialCommunityIcons name="file-excel-outline" size={18} color="#2563eb" />
-                                  <Text style={styles.addFormButtonText}>Cargar documento Excel</Text>
-                                </TouchableOpacity>
+                                <>
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.addFormButton,
+                                      hasUploadedExcel && styles.addFormButtonDisabled,
+                                    ]}
+                                    onPress={() => seleccionarDocumentoExcel(String(item.id))}
+                                    disabled={hasUploadedExcel}
+                                  >
+                                    <MaterialCommunityIcons
+                                      name="file-excel-outline"
+                                      size={18}
+                                      color={hasUploadedExcel ? "#94a3b8" : "#2563eb"}
+                                    />
+                                    <Text
+                                      style={[
+                                        styles.addFormButtonText,
+                                        hasUploadedExcel && styles.addFormButtonTextDisabled,
+                                      ]}
+                                    >
+                                      {hasUploadedExcel ? "Documento cargado" : "Cargar documento Excel"}
+                                    </Text>
+                                  </TouchableOpacity>
+
+                                  {hasUploadedExcel ? (
+                                    <TouchableOpacity
+                                      style={styles.removeDocumentButton}
+                                      onPress={() => eliminarDocumentoExcel(String(item.id))}
+                                    >
+                                      <MaterialCommunityIcons name="trash-can-outline" size={18} color="#be123c" />
+                                      <Text style={styles.removeDocumentButtonText}>Eliminar documento</Text>
+                                    </TouchableOpacity>
+                                  ) : null}
+                                </>
                               ) : null}
                               <Text style={styles.orderText}>
                                 Archivo: {excelDoc?.name || item.cotizacion?.documento_excel_nombre || "Sin documento cargado"}
@@ -1337,6 +1459,29 @@ const styles = StyleSheet.create({
     zIndex: 40,
     justifyContent: "center",
     padding: 20,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 60,
+    backgroundColor: "rgba(8,18,31,0.32)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  loadingCard: {
+    minWidth: 220,
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 20,
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+  },
+  loadingText: {
+    color: "#102447",
+    fontWeight: "800",
+    textAlign: "center",
   },
   quickFilterBackdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -1800,9 +1945,32 @@ const styles = StyleSheet.create({
     color: "#2563eb",
     fontWeight: "800",
   },
+  addFormButtonDisabled: {
+    backgroundColor: "#f1f5f9",
+    borderColor: "#e2e8f0",
+  },
+  addFormButtonTextDisabled: {
+    color: "#94a3b8",
+  },
   returnBlock: {
     marginTop: 6,
     gap: 10,
+  },
+  removeDocumentButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 8,
+    backgroundColor: "#fff1f2",
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#fecdd3",
+  },
+  removeDocumentButtonText: {
+    color: "#be123c",
+    fontWeight: "800",
   },
   returnToggleButton: {
     alignSelf: "flex-start",

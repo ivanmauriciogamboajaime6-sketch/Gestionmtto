@@ -5,6 +5,7 @@ import { router } from "expo-router";
 import { API_BASE_URL } from "../../constants/api";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const sanitizePassword = (value: string) => value.replace(/\u0000/g, "").replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 
 export default function RegisterTaller() {
   const [nombre, setNombre] = useState("");
@@ -27,6 +28,13 @@ export default function RegisterTaller() {
     }
 
     try {
+      const normalizedPassword = sanitizePassword(password);
+
+      if (!normalizedPassword) {
+        Alert.alert("Error", "Debes ingresar una contrasena valida");
+        return;
+      }
+
       const response = await fetch(`${API_BASE_URL}/talleres/register`, {
         method: "POST",
         headers: {
@@ -36,7 +44,7 @@ export default function RegisterTaller() {
           nombre: nombre.trim(),
           email: email.trim().toLowerCase(),
           telefono: telefono.trim(),
-          password,
+          password: normalizedPassword,
           rol: "taller",
         }),
       });
@@ -80,7 +88,7 @@ export default function RegisterTaller() {
         onChangeText={(value) => setTelefono(value.replace(/[^0-9]/g, ""))}
         keyboardType="phone-pad"
       />
-      <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} onChangeText={setPassword} />
+      <TextInput placeholder="Contrasena" secureTextEntry style={styles.input} value={password} onChangeText={(value) => setPassword(sanitizePassword(value))} />
 
       <TouchableOpacity style={styles.button} onPress={registrar}>
         <Text style={styles.buttonText}>Crear cuenta</Text>
