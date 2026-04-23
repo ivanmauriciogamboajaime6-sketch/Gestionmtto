@@ -11,6 +11,9 @@ export const REQUEST_STATUS = {
   SENT_TO_CLIENT: "enviada_cliente",
   APPROVED: "aprobada",
   WAITING_CLIENT: "espera_cliente",
+  INTERVENTION_STARTED: "intervencion_iniciada",
+  PARTS_DISPATCHED: "repuestos_despachados",
+  PARTS_RECEIVED_BY_WORKSHOP: "repuestos_recibidos_taller",
   IN_PROCESS: "en_proceso",
   FINISHED: "finalizada",
   REJECTED_ADMIN: "rechazada_admin",
@@ -98,7 +101,13 @@ export function isApprovedStatus(status?: string | null) {
 
 export function isInProcessStatus(status?: string | null) {
   const normalized = normalizeStatus(status);
-  return normalized === REQUEST_STATUS.IN_PROCESS || normalized === "en_reparacion";
+  return (
+    normalized === REQUEST_STATUS.IN_PROCESS ||
+    normalized === "en_reparacion" ||
+    normalized === REQUEST_STATUS.INTERVENTION_STARTED ||
+    normalized === REQUEST_STATUS.PARTS_DISPATCHED ||
+    normalized === REQUEST_STATUS.PARTS_RECEIVED_BY_WORKSHOP
+  );
 }
 
 export function isWaitingClientStatus(status?: string | null) {
@@ -158,7 +167,7 @@ export function getStatusLabel(status?: string | null) {
   if (isInReviewStatus(normalized)) return "En revision";
   if (normalized === REQUEST_STATUS.IN_WORKSHOP_ASSIGNMENT) return "En asignacion de taller";
   if (isInDiagnosisStatus(normalized)) return "En diagnostico";
-  if (normalized === REQUEST_STATUS.PENDING_CLIENT_WORKSHOP_INFO) return "Pendiente de envio al cliente";
+  if (normalized === REQUEST_STATUS.PENDING_CLIENT_WORKSHOP_INFO) return "Esperando confirmacion del cliente";
   if (isDiagnosedStatus(normalized)) return "Diagnosticada";
   if (isInQuotationStatus(normalized)) return "En cotizacion";
   if (isQuotedStatus(normalized)) return "Cotizada";
@@ -166,6 +175,9 @@ export function getStatusLabel(status?: string | null) {
   if (isSentToClientStatus(normalized)) return "Enviada al cliente";
   if (isApprovedStatus(normalized)) return "Aprobada";
   if (isWaitingClientStatus(normalized)) return "En espera de cliente";
+  if (normalized === REQUEST_STATUS.INTERVENTION_STARTED) return "Intervencion iniciada";
+  if (normalized === REQUEST_STATUS.PARTS_DISPATCHED) return "Repuestos despachados";
+  if (normalized === REQUEST_STATUS.PARTS_RECEIVED_BY_WORKSHOP) return "Repuestos recibidos por taller";
   if (normalized === "en_reparacion") return "En reparacion";
   if (isInProcessStatus(normalized)) return "En proceso";
   if (isFinishedStatus(normalized)) return "Finalizada";
@@ -177,4 +189,88 @@ export function getStatusLabel(status?: string | null) {
   if (normalized === "omitida_admin") return "Omitida";
 
   return status || "Sin estado";
+}
+
+export function getStatusTone(status?: string | null) {
+  const normalized = normalizeStatus(status);
+  const label = getStatusLabel(normalized);
+
+  if (
+    isCreatedStatus(normalized) ||
+    isInReviewStatus(normalized) ||
+    normalized === REQUEST_STATUS.IN_WORKSHOP_ASSIGNMENT ||
+    isInDiagnosisStatus(normalized) ||
+    isDiagnosedStatus(normalized) ||
+    isInQuotationStatus(normalized)
+  ) {
+    return {
+      label,
+      backgroundColor: "#fff7d6",
+      borderColor: "#fde68a",
+      color: "#b7791f",
+    };
+  }
+
+  if (
+    isQuotedStatus(normalized) ||
+    isProposalReadyStatus(normalized) ||
+    isSentToClientStatus(normalized) ||
+    isApprovedStatus(normalized) ||
+    isWaitingClientStatus(normalized)
+  ) {
+    return {
+      label,
+      backgroundColor: "#dcfce7",
+      borderColor: "#86efac",
+      color: "#15803d",
+    };
+  }
+
+  if (isInProcessStatus(normalized)) {
+    return {
+      label,
+      backgroundColor: "#e0f2fe",
+      borderColor: "#93c5fd",
+      color: "#0369a1",
+    };
+  }
+
+  if (isFinishedStatus(normalized)) {
+    return {
+      label,
+      backgroundColor: "#dcfce7",
+      borderColor: "#86efac",
+      color: "#166534",
+    };
+  }
+
+  if (
+    isRejectedAdminStatus(normalized) ||
+    isRejectedWorkshopStatus(normalized) ||
+    isRejectedProviderStatus(normalized) ||
+    isRejectedClientStatus(normalized)
+  ) {
+    return {
+      label,
+      backgroundColor: "#fee2e2",
+      borderColor: "#fecaca",
+      color: "#b91c1c",
+    };
+  }
+
+  if (isCancelledStatus(normalized)) {
+    return {
+      label,
+      backgroundColor: "#e2e8f0",
+      borderColor: "#cbd5e1",
+      color: "#475569",
+    };
+  }
+
+  return {
+    label,
+    backgroundColor: "#eef2ff",
+    borderColor: "#c7d2fe",
+    color: "#3730a3",
+  };
 }

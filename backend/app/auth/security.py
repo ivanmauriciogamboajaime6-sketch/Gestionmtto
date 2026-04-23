@@ -1,4 +1,5 @@
 from passlib.context import CryptContext
+from passlib.exc import PasswordValueError
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -8,4 +9,7 @@ def hash_password(password: str):
 
 
 def verify_password(password: str, hashed: str):
-    return pwd_context.verify(password, hashed)
+    try:
+        return pwd_context.verify(password, hashed)
+    except PasswordValueError:
+        return False

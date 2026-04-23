@@ -31,4 +31,5 @@ class Solicitud(Base):
     servicios_taller = Column(Text, nullable=True)
     horas_taller = Column(String(20), nullable=True)
     materiales_taller = Column(Text, nullable=True)
+    flujo_mantenimiento = Column(Text, nullable=True)
     fecha = Column(DateTime, server_default=func.now())

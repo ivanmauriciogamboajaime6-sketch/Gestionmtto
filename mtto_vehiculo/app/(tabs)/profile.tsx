@@ -1,8 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,10 +17,12 @@ import {
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import { API_BASE_URL } from "../../constants/api";
 import { formatCurrency, formatDateTime, formatNumberWithDots } from "../../constants/formatters";
 import {
-  getStatusLabel,
+  getStatusTone,
   isApprovedStatus,
   isFinishedStatus,
   isInProcessStatus,
@@ -47,6 +52,11 @@ type Solicitud = {
   cliente?: {
     nombre?: string;
   };
+  proveedores_estado?: {
+    id?: number | string | null;
+    estado?: string | null;
+    comentario?: string | null;
+  }[];
   cotizacion?: {
     proveedor_id?: number | string | null;
     marca?: string | null;
@@ -55,9 +65,18 @@ type Solicitud = {
     disponibilidad?: string | null;
     precio?: string | null;
     observacion?: string | null;
+    documento_excel_nombre?: string | null;
   };
   respuesta_proveedor?: {
     comentario?: string | null;
+  };
+  flujo_mantenimiento?: {
+    repuestos_solicitados?: {
+      nombre?: string | null;
+      cantidad?: number | null;
+    }[];
+    timeline?: Record<string, string | null>;
+    confirmaciones?: Record<string, boolean | string | null>;
   };
 };
 
@@ -76,6 +95,12 @@ type QuoteFormState = {
   disponibilidad: string;
   precio: string;
   observacion: string;
+};
+
+type UploadedExcelState = {
+  name: string;
+  mime: string;
+  base64: string;
 };
 
 const providerSections = [
@@ -104,6 +129,51 @@ const emptyForm = (): QuoteFormState => ({
 });
 
 const getCaseNumber = (item: Solicitud) => item.numero_caso ?? item.id;
+
+const parseUserIdFromToken = (token?: string | null) => {
+  if (!token) return null;
+
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    if (typeof globalThis.atob !== "function") return null;
+
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = globalThis.atob(padded);
+    const data = JSON.parse(decoded);
+    const id = Number(data?.id);
+    return Number.isFinite(id) ? id : null;
+  } catch (error) {
+    console.log("No se pudo leer el id del proveedor desde el token", error);
+    return null;
+  }
+};
+
+const getProviderResponseState = (item: Solicitud, providerId?: number | null) => {
+  if (!providerId) return null;
+
+  const providerState = (item.proveedores_estado || []).find(
+    (provider) => String(provider.id) === String(providerId)
+  );
+
+  return normalizeStatus(providerState?.estado);
+};
+
+const hasProviderFinishedQuotation = (item: Solicitud, providerId?: number | null) => {
+  const providerState = getProviderResponseState(item, providerId);
+  return providerState === "cotizado" || providerState === "devuelto";
+};
+
+const isSelectedProviderForOrder = (item: Solicitud, providerId?: number | null) => {
+  if (!providerId) return false;
+  return String(item.cotizacion?.proveedor_id ?? "") === String(providerId);
+};
+
+const hasClientApprovedFlow = (item: Solicitud) =>
+  Boolean(item.flujo_mantenimiento?.timeline?.cliente_aprueba_propuesta_en) ||
+  isApprovedStatus(item.estado) ||
+  isInProcessStatus(item.estado);
 
 const getProviderRequestPriority = (item: Solicitud) => {
   const status = normalizeStatus(item.estado);
@@ -151,6 +221,9 @@ export default function ProviderDashboardScreen() {
   const [selectedSection, setSelectedSection] = useState("Cotizaciones");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [selectedVehicleFilter, setSelectedVehicleFilter] = useState("Todos");
+  const [selectedDateFilter, setSelectedDateFilter] = useState("Todas");
   const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [expandedQuoteId, setExpandedQuoteId] = useState<string | null>(null);
@@ -158,6 +231,18 @@ export default function ProviderDashboardScreen() {
   const [returningQuoteId, setReturningQuoteId] = useState<string | null>(null);
   const [returnComment, setReturnComment] = useState("");
   const [orderComments, setOrderComments] = useState<Record<string, string>>({});
+  const [uploadedExcelDocs, setUploadedExcelDocs] = useState<Record<string, UploadedExcelState>>({});
+  const [providerId, setProviderId] = useState<number | null>(null);
+  const [actionLoadingMessage, setActionLoadingMessage] = useState<string | null>(null);
+
+  const withActionLoading = async <T,>(message: string, action: () => Promise<T>) => {
+    try {
+      setActionLoadingMessage(message);
+      return await action();
+    } finally {
+      setActionLoadingMessage(null);
+    }
+  };
 
   const redirigirAlLogin = () => {
     if (Platform.OS === "web") {
@@ -232,7 +317,9 @@ export default function ProviderDashboardScreen() {
   useEffect(() => {
     const loadUser = async () => {
       const name = await storage.getItem("user_name");
+      const token = await storage.getItem("token");
       if (name) setProviderName(name);
+      setProviderId(parseUserIdFromToken(token));
     };
 
     loadUser();
@@ -240,6 +327,7 @@ export default function ProviderDashboardScreen() {
 
   useFocusEffect(
     React.useCallback(() => {
+      setActionLoadingMessage(null);
       cargarSolicitudes();
       cargarNotificaciones();
 
@@ -259,24 +347,33 @@ export default function ProviderDashboardScreen() {
   }, [isMobile]);
 
   const cotizaciones = useMemo(
-    () => dedupeProviderRequests(solicitudes).filter((item) => isInQuotationStatus(item.estado)),
-    [solicitudes]
+    () =>
+      dedupeProviderRequests(solicitudes).filter(
+        (item) => isInQuotationStatus(item.estado) && !hasProviderFinishedQuotation(item, providerId)
+      ),
+    [providerId, solicitudes]
   );
 
   const pedidos = useMemo(
     () =>
       dedupeProviderRequests(solicitudes).filter((item) =>
-        isApprovedStatus(item.estado) || isWaitingClientStatus(item.estado) || isInProcessStatus(item.estado)
+        isSelectedProviderForOrder(item, providerId) &&
+        hasClientApprovedFlow(item) &&
+        !item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
       ).sort((a, b) => Number(b.id || 0) - Number(a.id || 0)),
-    [solicitudes]
+    [providerId, solicitudes]
   );
 
   const entregas = useMemo(
     () =>
       dedupeProviderRequests(solicitudes).filter((item) =>
-        isQuotedStatus(item.estado) || isFinishedStatus(item.estado) || isRejectedProviderStatus(item.estado)
+        isQuotedStatus(item.estado) ||
+        isFinishedStatus(item.estado) ||
+        isRejectedProviderStatus(item.estado) ||
+        hasProviderFinishedQuotation(item, providerId) ||
+        Boolean(item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado)
       ),
-    [solicitudes]
+    [providerId, solicitudes]
   );
 
   const unreadNotifications = useMemo(
@@ -301,6 +398,116 @@ export default function ProviderDashboardScreen() {
     if (value.includes("aceite") || value.includes("filtro")) return "Solicitud de aceite";
 
     return tipoServicio || "Solicitud";
+  };
+
+  const esSolicitudMantenimientoTaller = (
+    tipoServicio?: string,
+    flujoMantenimiento?: Solicitud["flujo_mantenimiento"]
+  ) => {
+    const value = (tipoServicio || "").toLowerCase();
+    const tieneFlujoMantenimiento = Boolean(
+      flujoMantenimiento?.repuestos_solicitados?.length || flujoMantenimiento?.confirmaciones
+    );
+    return (
+      tieneFlujoMantenimiento ||
+      (
+        !isQuoteWorkflowService(tipoServicio) &&
+        (value.includes(",") ||
+          value.includes(":") ||
+          value.includes("mantenimiento") ||
+          value.includes("diagnostico") ||
+          value.includes("motor") ||
+          value.includes("suspension") ||
+          value.includes("alineacion") ||
+          value.includes("enfriamiento") ||
+          value.includes("recalentamiento") ||
+          value.includes("temperatura") ||
+          value.includes("radiador"))
+      )
+    );
+  };
+
+  const seleccionarDocumentoExcel = async (solicitudId: string) => {
+    const acceptedMime =
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+    if (Platform.OS === "web" && typeof document !== "undefined") {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept =
+        ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel";
+
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const base64 = result.includes(",") ? result.split(",")[1] || "" : result;
+          setUploadedExcelDocs((current) => ({
+            ...current,
+            [solicitudId]: {
+              name: file.name,
+              mime: file.type || acceptedMime,
+              base64,
+              },
+          }));
+          Alert.alert("Documento cargado", `Se adjunto ${file.name}.`);
+        };
+        reader.readAsDataURL(file);
+      };
+
+      input.click();
+      return;
+    }
+
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: [
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "application/vnd.ms-excel",
+        ],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const uri = asset.uri;
+      if (!uri) {
+        Alert.alert("Error", "No se pudo leer el archivo seleccionado.");
+        return;
+      }
+
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      setUploadedExcelDocs((current) => ({
+        ...current,
+        [solicitudId]: {
+          name: asset.name || `cotizacion-${solicitudId}.xlsx`,
+          mime: asset.mimeType || acceptedMime,
+          base64,
+        },
+      }));
+      Alert.alert("Documento cargado", `Se adjunto ${asset.name || "el archivo Excel"}.`);
+    } catch (error) {
+      console.log("Error seleccionando documento Excel", error);
+      Alert.alert("Error", "No se pudo cargar el archivo de Excel.");
+    }
+  };
+
+  const eliminarDocumentoExcel = (solicitudId: string) => {
+    setUploadedExcelDocs((current) => {
+      const next = { ...current };
+      delete next[solicitudId];
+      return next;
+    });
   };
 
   const abrirFormularioCotizacion = (item: Solicitud) => {
@@ -399,11 +606,23 @@ export default function ProviderDashboardScreen() {
   const enviarCotizacion = async (solicitudId: string | number | undefined) => {
     if (solicitudId == null) return;
 
+    const solicitud = solicitudes.find((item) => String(item.id) === String(solicitudId));
+    const esMantenimiento = esSolicitudMantenimientoTaller(
+      solicitud?.tipo_servicio,
+      solicitud?.flujo_mantenimiento
+    );
+    const excelDoc = uploadedExcelDocs[String(solicitudId)];
+
     const camposVacios = quoteForms.some((form) =>
       Object.entries(form).some(([, value]) => !value.trim())
     );
-    if (camposVacios) {
+    if (!esMantenimiento && camposVacios) {
       Alert.alert("Campos requeridos", "Debes completar todos los campos de la cotizacion.");
+      return;
+    }
+
+    if (esMantenimiento && !excelDoc?.base64) {
+      Alert.alert("Excel requerido", "Debes cargar el documento Excel de la cotizacion.");
       return;
     }
 
@@ -414,30 +633,40 @@ export default function ProviderDashboardScreen() {
       disponibilidad: quoteForms.map((item) => item.disponibilidad.trim()).join(" | "),
       precio: quoteForms.map((item) => item.precio.trim()).join(" | "),
       observacion: quoteForms.map((item) => item.observacion.trim()).join(" | "),
+      documento_excel_nombre: excelDoc?.name || null,
+      documento_excel_mime: excelDoc?.mime || null,
+      documento_excel_base64: excelDoc?.base64 || null,
     };
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-proveedor`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
+      await withActionLoading("Enviando cotizacion...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/respuesta-proveedor`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion");
+          return;
+        }
+
+        setExpandedQuoteId(null);
+        setQuoteForms([emptyForm()]);
+        setUploadedExcelDocs((current) => {
+          const next = { ...current };
+          delete next[String(solicitudId)];
+          return next;
+        });
+        await cargarSolicitudes();
+        Alert.alert("Enviado", "La cotizacion fue enviada al administrador.");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo enviar la cotizacion");
-        return;
-      }
-
-      setExpandedQuoteId(null);
-      setQuoteForms([emptyForm()]);
-      await cargarSolicitudes();
-      Alert.alert("Enviado", "La cotizacion fue enviada al administrador.");
     } catch (error) {
       console.log("Error enviando cotizacion", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -453,28 +682,30 @@ export default function ProviderDashboardScreen() {
     }
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/devolver-proveedor`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ comentario: returnComment.trim() }),
+      await withActionLoading("Devolviendo solicitud...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/devolver-proveedor`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ comentario: returnComment.trim() }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo devolver la solicitud");
+          return;
+        }
+
+        setReturningQuoteId(null);
+        setReturnComment("");
+        setExpandedQuoteId(null);
+        await cargarSolicitudes();
+        Alert.alert("Devuelta", "La solicitud fue devuelta al administrador.");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo devolver la solicitud");
-        return;
-      }
-
-      setReturningQuoteId(null);
-      setReturnComment("");
-      setExpandedQuoteId(null);
-      await cargarSolicitudes();
-      Alert.alert("Devuelta", "La solicitud fue devuelta al administrador.");
     } catch (error) {
       console.log("Error devolviendo solicitud", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -483,32 +714,34 @@ export default function ProviderDashboardScreen() {
 
   const actualizarEstadoPedido = async (
     solicitudId: string | number | undefined,
-    estado: "espera_cliente" | "en_reparacion" | "finalizada",
+    estado: "espera_cliente" | "en_reparacion" | "finalizada" | "repuestos_despachados",
     successMessage: string
   ) => {
     if (solicitudId == null) return;
 
     try {
-      const comentario = (orderComments[String(solicitudId)] || "").trim();
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ estado, comentario }),
+      await withActionLoading("Actualizando pedido...", async () => {
+        const comentario = (orderComments[String(solicitudId)] || "").trim();
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/estado`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ estado, comentario }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo actualizar el pedido");
+          return;
+        }
+
+        await cargarSolicitudes();
+        Alert.alert("Actualizado", successMessage);
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        Alert.alert("Error", data.detail || "No se pudo actualizar el pedido");
-        return;
-      }
-
-      await cargarSolicitudes();
-      Alert.alert("Actualizado", successMessage);
     } catch (error) {
       console.log("Error actualizando estado proveedor", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -516,46 +749,109 @@ export default function ProviderDashboardScreen() {
   };
 
   const renderStatus = (estado?: string) => {
-    const normalized = normalizeStatus(estado);
-
-    if (isQuotedStatus(normalized)) {
-      return {
-        label: getStatusLabel(normalized),
-        containerStyle: styles.statusPillSuccess,
-        textStyle: styles.statusTextSuccess,
-      };
-    }
-
-    if (isRejectedProviderStatus(normalized)) {
-      return {
-        label: getStatusLabel(normalized),
-        containerStyle: styles.statusPillReturned,
-        textStyle: styles.statusTextReturned,
-      };
-    }
-
-    if (isApprovedStatus(normalized) || isInProcessStatus(normalized)) {
-      return {
-        label: getStatusLabel(normalized),
-        containerStyle: styles.statusPillSuccess,
-        textStyle: styles.statusTextSuccess,
-      };
-    }
-
-    if (isWaitingClientStatus(normalized)) {
-      return {
-        label: getStatusLabel(normalized),
-        containerStyle: styles.statusPillPending,
-        textStyle: styles.statusTextPending,
-      };
-    }
-
-    return {
-      label: getStatusLabel(normalized),
-      containerStyle: styles.statusPillPending,
-      textStyle: styles.statusTextPending,
-    };
+    return getStatusTone(estado);
   };
+
+  const providerVehicleFilters = useMemo(
+    () => [
+      "Todos",
+      ...Array.from(
+        new Set(
+          solicitudes
+            .map((item) => [item.vehiculo?.marca, item.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo")
+            .filter(Boolean)
+        )
+      ),
+    ],
+    [solicitudes]
+  );
+  const providerDateFilters = ["Todas", "Hoy", "Ultimos 7 dias", "Sin fecha"];
+
+  const matchesQuickFilters = useCallback(
+    (item: Solicitud) => {
+      const vehicleName = [item.vehiculo?.marca, item.vehiculo?.modelo].filter(Boolean).join(" ") || "Vehiculo";
+      const vehicleMatch = selectedVehicleFilter === "Todos" || vehicleName === selectedVehicleFilter;
+
+      const rawDate = item.fecha_recepcion || item.fecha;
+      const parsedDate = rawDate ? new Date(rawDate) : null;
+      const hasDate = parsedDate != null && !Number.isNaN(parsedDate.getTime());
+      const now = new Date();
+      const diffMs = hasDate ? now.getTime() - parsedDate.getTime() : null;
+      const dayMs = 1000 * 60 * 60 * 24;
+
+      const dateMatch =
+        selectedDateFilter === "Todas" ||
+        (selectedDateFilter === "Sin fecha" && !hasDate) ||
+        (selectedDateFilter === "Hoy" && hasDate && parsedDate!.toDateString() === now.toDateString()) ||
+        (selectedDateFilter === "Ultimos 7 dias" && hasDate && diffMs != null && diffMs <= dayMs * 7);
+
+      return vehicleMatch && dateMatch;
+    },
+    [selectedDateFilter, selectedVehicleFilter]
+  );
+
+  const filtrarSolicitudes = useCallback(
+    (items: Solicitud[]) => items.filter((item) => matchesQuickFilters(item)),
+    [matchesQuickFilters]
+  );
+
+  const renderQuickFilterModal = () =>
+    showFilterModal ? (
+      <View style={styles.quickFilterOverlay} pointerEvents="box-none">
+        <Pressable style={styles.quickFilterBackdrop} onPress={() => setShowFilterModal(false)} />
+        <View style={styles.quickFilterCard}>
+          <Text style={styles.quickFilterTitle}>Filtros rapidos</Text>
+          <Text style={styles.quickFilterLabel}>Vehiculo</Text>
+          <View style={styles.quickFilterChipWrap}>
+            {providerVehicleFilters.map((filter) => (
+              <TouchableOpacity
+                key={filter}
+                style={[
+                  styles.quickFilterChip,
+                  selectedVehicleFilter === filter && styles.quickFilterChipActive,
+                ]}
+                onPress={() => setSelectedVehicleFilter(filter)}
+              >
+                <Text style={[styles.quickFilterChipText, selectedVehicleFilter === filter && styles.quickFilterChipTextActive]}>
+                  {filter}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={styles.quickFilterLabel}>Fecha</Text>
+          <View style={styles.quickFilterChipWrap}>
+            {providerDateFilters.map((filter) => (
+              <TouchableOpacity
+                key={filter}
+                style={[
+                  styles.quickFilterChip,
+                  selectedDateFilter === filter && styles.quickFilterChipActive,
+                ]}
+                onPress={() => setSelectedDateFilter(filter)}
+              >
+                <Text style={[styles.quickFilterChipText, selectedDateFilter === filter && styles.quickFilterChipTextActive]}>
+                  {filter}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.quickFilterActions}>
+            <TouchableOpacity
+              style={styles.secondaryButton}
+              onPress={() => {
+                setSelectedVehicleFilter("Todos");
+                setSelectedDateFilter("Todas");
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>Limpiar</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => setShowFilterModal(false)}>
+              <Text style={styles.primaryButtonText}>Aplicar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    ) : null;
 
   const actualizarComentarioPedido = (solicitudId: string, value: string) => {
     setOrderComments((current) => ({
@@ -576,6 +872,15 @@ export default function ProviderDashboardScreen() {
       style={styles.screen}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
+    <Modal transparent visible={Boolean(actionLoadingMessage)} animationType="fade">
+      <View style={styles.loadingOverlay}>
+        <View style={styles.loadingCard}>
+          <ActivityIndicator size="large" color="#2563eb" />
+          <Text style={styles.loadingText}>{actionLoadingMessage || "Procesando..."}</Text>
+        </View>
+      </View>
+    </Modal>
+    {renderQuickFilterModal()}
     <ScrollView
       style={styles.screen}
       contentContainerStyle={styles.content}
@@ -718,12 +1023,33 @@ export default function ProviderDashboardScreen() {
 
           {selectedSection === "Cotizaciones" ? (
             <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Cotizaciones</Text>
-              {cotizaciones.length > 0 ? (
-                cotizaciones.map((item) => {
+              <View style={styles.moduleHeaderCard}>
+                <View style={styles.moduleHeaderText}>
+                  <Text style={styles.moduleHeaderTitle}>Modulo: Proveedor</Text>
+                  <Text style={styles.moduleHeaderSubtitle}>Gestion centralizada de cotizaciones y pedidos.</Text>
+                </View>
+                <View style={styles.moduleHeaderBadge}>
+                  <MaterialCommunityIcons name="clipboard-list-outline" size={18} color="#2563eb" />
+                  <Text style={styles.moduleHeaderBadgeText}>{filtrarSolicitudes(cotizaciones).length}</Text>
+                </View>
+              </View>
+              <View style={styles.sectionToolbar}>
+                <Text style={styles.sectionToolbarTitle}>Cotizaciones</Text>
+                <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+                  <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+                </TouchableOpacity>
+              </View>
+              {filtrarSolicitudes(cotizaciones).length > 0 ? (
+                filtrarSolicitudes(cotizaciones).map((item) => {
                   const statusInfo = renderStatus(item.estado);
                   const isExpanded = expandedQuoteId === String(item.id);
                   const isQuoted = isQuotedStatus(item.estado);
+                  const isMaintenance = esSolicitudMantenimientoTaller(
+                    item.tipo_servicio,
+                    item.flujo_mantenimiento
+                  );
+                  const excelDoc = uploadedExcelDocs[String(item.id)];
+                  const hasUploadedExcel = Boolean(excelDoc?.base64);
 
                   return (
                     <View key={String(item.id)} style={styles.orderCard}>
@@ -733,8 +1059,8 @@ export default function ProviderDashboardScreen() {
                       >
                         <View style={styles.orderHeader}>
                           <Text style={styles.orderTitle}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
-                          <View style={[styles.statusPill, statusInfo.containerStyle]}>
-                            <Text style={[styles.statusText, statusInfo.textStyle]}>
+                          <View style={[styles.statusPill, { backgroundColor: statusInfo.backgroundColor, borderColor: statusInfo.borderColor }]}>
+                            <Text style={[styles.statusText, { color: statusInfo.color }]}>
                               {statusInfo.label}
                             </Text>
                           </View>
@@ -760,7 +1086,58 @@ export default function ProviderDashboardScreen() {
                         <View style={styles.quoteFormCard}>
                           <Text style={styles.quoteFormTitle}>Responder cotizacion</Text>
 
-                          {quoteForms.map((form, index) => (
+                          {isMaintenance ? (
+                            <View style={styles.returnBlock}>
+                              <Text style={styles.orderText}>
+                                Repuestos solicitados: {item.flujo_mantenimiento?.repuestos_solicitados?.length
+                                  ? item.flujo_mantenimiento.repuestos_solicitados
+                                      .map((repuesto) => `${repuesto.nombre || "Repuesto"} x${repuesto.cantidad || 0}`)
+                                      .join(", ")
+                                  : "Sin detalle"}
+                              </Text>
+                              {!isQuoted ? (
+                                <>
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.addFormButton,
+                                      hasUploadedExcel && styles.addFormButtonDisabled,
+                                    ]}
+                                    onPress={() => seleccionarDocumentoExcel(String(item.id))}
+                                    disabled={hasUploadedExcel}
+                                  >
+                                    <MaterialCommunityIcons
+                                      name="file-excel-outline"
+                                      size={18}
+                                      color={hasUploadedExcel ? "#94a3b8" : "#2563eb"}
+                                    />
+                                    <Text
+                                      style={[
+                                        styles.addFormButtonText,
+                                        hasUploadedExcel && styles.addFormButtonTextDisabled,
+                                      ]}
+                                    >
+                                      {hasUploadedExcel ? "Documento cargado" : "Cargar documento Excel"}
+                                    </Text>
+                                  </TouchableOpacity>
+
+                                  {hasUploadedExcel ? (
+                                    <TouchableOpacity
+                                      style={styles.removeDocumentButton}
+                                      onPress={() => eliminarDocumentoExcel(String(item.id))}
+                                    >
+                                      <MaterialCommunityIcons name="trash-can-outline" size={18} color="#be123c" />
+                                      <Text style={styles.removeDocumentButtonText}>Eliminar documento</Text>
+                                    </TouchableOpacity>
+                                  ) : null}
+                                </>
+                              ) : null}
+                              <Text style={styles.orderText}>
+                                Archivo: {excelDoc?.name || item.cotizacion?.documento_excel_nombre || "Sin documento cargado"}
+                              </Text>
+                            </View>
+                          ) : null}
+
+                          {!isMaintenance ? quoteForms.map((form, index) => (
                             <View key={`quote-form-${index}`} style={styles.extraFormBlock}>
                               <TextInput
                                 style={styles.input}
@@ -819,9 +1196,9 @@ export default function ProviderDashboardScreen() {
                                 maxLength={100}
                               />
                             </View>
-                          ))}
+                          )) : null}
 
-                          {!isQuoted ? (
+                          {!isQuoted && !isMaintenance ? (
                             <TouchableOpacity style={styles.addFormButton} onPress={agregarFormulario}>
                               <MaterialCommunityIcons name="plus" size={18} color="#2563eb" />
                               <Text style={styles.addFormButtonText}>Agregar otro formulario</Text>
@@ -899,21 +1276,30 @@ export default function ProviderDashboardScreen() {
 
           {selectedSection === "Pedidos" ? (
             <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Pedidos</Text>
-              {pedidos.length > 0 ? (
-                pedidos.map((item) => (
+              <View style={styles.sectionToolbar}>
+                <Text style={styles.sectionToolbarTitle}>Pedidos</Text>
+                <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+                  <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+                </TouchableOpacity>
+              </View>
+              {filtrarSolicitudes(pedidos).length > 0 ? (
+                filtrarSolicitudes(pedidos).map((item) => (
                   <View key={String(item.id)} style={styles.orderCard}>
                     {(() => {
                       const isWaitingClient = isWaitingClientStatus(item.estado);
                       const isRepairing = normalizeStatus(item.estado) === "en_reparacion";
+                      const isMaintenance = esSolicitudMantenimientoTaller(
+                        item.tipo_servicio,
+                        item.flujo_mantenimiento
+                      );
                       const commentValue = orderComments[String(item.id)] ?? item.respuesta_proveedor?.comentario ?? "";
 
                       return (
                         <>
                     <View style={styles.orderHeader}>
                       <Text style={styles.orderTitle}>{obtenerTituloSolicitud(item.tipo_servicio)}</Text>
-                      <View style={[styles.statusPill, renderStatus(item.estado).containerStyle]}>
-                        <Text style={[styles.statusText, renderStatus(item.estado).textStyle]}>
+                      <View style={[styles.statusPill, { backgroundColor: renderStatus(item.estado).backgroundColor, borderColor: renderStatus(item.estado).borderColor }]}>
+                        <Text style={[styles.statusText, { color: renderStatus(item.estado).color }]}>
                           {renderStatus(item.estado).label}
                         </Text>
                       </View>
@@ -962,6 +1348,20 @@ export default function ProviderDashboardScreen() {
                           </TouchableOpacity>
                         ) : null}
                       </View>
+                    ) : isMaintenance ? (
+                      <View style={styles.actionRow}>
+                        {!item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado &&
+                        !isFinishedStatus(item.estado) ? (
+                          <TouchableOpacity
+                            style={styles.primaryButton}
+                            onPress={() =>
+                              actualizarEstadoPedido(item.id, "repuestos_despachados", "El despacho de repuestos fue confirmado.")
+                            }
+                          >
+                            <Text style={styles.primaryButtonText}>Confirmar despacho</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
                     ) : null}
                         </>
                       );
@@ -977,33 +1377,43 @@ export default function ProviderDashboardScreen() {
           {selectedSection === "Historial"
             ? (
               <View style={styles.panel}>
-                <Text style={styles.panelTitle}>Historial</Text>
-                {entregas.length > 0 ? (
-                  entregas.map((item) => (
+                <View style={styles.sectionToolbar}>
+                  <Text style={styles.sectionToolbarTitle}>Historial</Text>
+                  <TouchableOpacity style={styles.filterActionButton} onPress={() => setShowFilterModal(true)}>
+                    <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+                  </TouchableOpacity>
+                </View>
+                {filtrarSolicitudes(entregas).length > 0 ? (
+                  filtrarSolicitudes(entregas).map((item) => (
                     <View key={String(item.id)} style={styles.orderCard}>
                       <View style={styles.orderHeader}>
                         <Text style={styles.orderTitle}>Registro #{item.id}</Text>
-                        <View
-                          style={[
-                            styles.statusPill,
-                            isRejectedProviderStatus(item.estado)
-                              ? styles.statusPillReturned
-                              : styles.statusPillSuccess,
+                      <View
+                        style={[
+                          styles.statusPill,
+                          {
+                              backgroundColor: item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
+                                ? "#dcfce7"
+                                : renderStatus(item.estado).backgroundColor,
+                              borderColor: item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
+                                ? "#86efac"
+                                : renderStatus(item.estado).borderColor,
+                            },
                           ]}
                         >
                           <Text
                             style={[
                               styles.statusText,
-                              isRejectedProviderStatus(item.estado)
-                                ? styles.statusTextReturned
-                                : styles.statusTextSuccess,
+                              {
+                                color: item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
+                                  ? "#166534"
+                                  : renderStatus(item.estado).color,
+                              },
                             ]}
                           >
-                            {isQuotedStatus(item.estado)
-                              ? getStatusLabel(item.estado)
-                              : isRejectedProviderStatus(item.estado)
-                                ? getStatusLabel(item.estado)
-                                : getStatusLabel(item.estado)}
+                            {item.flujo_mantenimiento?.confirmaciones?.proveedor_despacho_confirmado
+                              ? "Finalizada"
+                              : renderStatus(item.estado).label}
                           </Text>
                         </View>
                       </View>
@@ -1043,6 +1453,89 @@ const styles = StyleSheet.create({
   content: {
     padding: 20,
     paddingBottom: 32,
+  },
+  quickFilterOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 40,
+    justifyContent: "center",
+    padding: 20,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 60,
+    backgroundColor: "rgba(8,18,31,0.32)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  loadingCard: {
+    minWidth: 220,
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 20,
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+  },
+  loadingText: {
+    color: "#102447",
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  quickFilterBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(8,18,31,0.28)",
+  },
+  quickFilterCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 24,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+    shadowColor: "#08121f",
+    shadowOpacity: 0.14,
+    shadowRadius: 18,
+    elevation: 8,
+  },
+  quickFilterTitle: {
+    color: "#102447",
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 12,
+  },
+  quickFilterLabel: {
+    color: "#475569",
+    fontWeight: "700",
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  quickFilterChipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  quickFilterChip: {
+    backgroundColor: "#eef3f9",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  quickFilterChipActive: {
+    backgroundColor: "#dbeafe",
+  },
+  quickFilterChipText: {
+    color: "#425066",
+    fontWeight: "700",
+  },
+  quickFilterChipTextActive: {
+    color: "#1d4ed8",
+  },
+  quickFilterActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 16,
   },
   layout: {
     width: "100%",
@@ -1267,6 +1760,67 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#dbe4f0",
   },
+  moduleHeaderCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 24,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#e8edf6",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 14,
+  },
+  moduleHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  moduleHeaderTitle: {
+    color: "#102447",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  moduleHeaderSubtitle: {
+    color: "#64748b",
+    lineHeight: 18,
+  },
+  moduleHeaderBadge: {
+    minWidth: 44,
+    height: 44,
+    borderRadius: 16,
+    backgroundColor: "#eff6ff",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    paddingHorizontal: 8,
+  },
+  moduleHeaderBadgeText: {
+    color: "#1d4ed8",
+    fontWeight: "800",
+    fontSize: 12,
+  },
+  sectionToolbar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  sectionToolbarTitle: {
+    color: "#102447",
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  filterActionButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   panelTitle: {
     fontSize: 20,
     fontWeight: "800",
@@ -1278,12 +1832,16 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   orderCard: {
-    backgroundColor: "#f8fbff",
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 18,
     borderWidth: 1,
     borderColor: "#e6edf6",
     marginTop: 12,
+    shadowColor: "#08121f",
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 2,
   },
   orderHeader: {
     flexDirection: "row",
@@ -1305,7 +1863,8 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     borderRadius: 999,
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
+    borderWidth: 1,
   },
   statusPillPending: {
     backgroundColor: "#fff2e8",
@@ -1386,9 +1945,32 @@ const styles = StyleSheet.create({
     color: "#2563eb",
     fontWeight: "800",
   },
+  addFormButtonDisabled: {
+    backgroundColor: "#f1f5f9",
+    borderColor: "#e2e8f0",
+  },
+  addFormButtonTextDisabled: {
+    color: "#94a3b8",
+  },
   returnBlock: {
     marginTop: 6,
     gap: 10,
+  },
+  removeDocumentButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 8,
+    backgroundColor: "#fff1f2",
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#fecdd3",
+  },
+  removeDocumentButtonText: {
+    color: "#be123c",
+    fontWeight: "800",
   },
   returnToggleButton: {
     alignSelf: "flex-start",

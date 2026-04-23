@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -15,9 +17,10 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { CommonActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import { API_BASE_URL } from "../../constants/api";
-import { formatDateTime, formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
+import { formatCurrency, formatDateTime, formatKilometraje, formatNumberWithDots, parseFormattedNumber } from "../../constants/formatters";
 import {
   getStatusLabel,
+  isApprovedStatus,
   isCancelledStatus,
   isCreatedStatus,
   isDiagnosedStatus,
@@ -73,6 +76,9 @@ type Solicitud = {
     disponibilidad?: string | null;
     precio?: string | null;
     observacion?: string | null;
+    documento_excel_nombre?: string | null;
+    documento_excel_mime?: string | null;
+    documento_excel_base64?: string | null;
     respuestas?: {
       proveedor_id?: string | number | null;
       solicitud_id?: string | number | null;
@@ -84,7 +90,30 @@ type Solicitud = {
       disponibilidad?: string | null;
       precio?: string | null;
       observacion?: string | null;
+      documento_excel_nombre?: string | null;
+      documento_excel_mime?: string | null;
+      documento_excel_base64?: string | null;
     }[];
+  };
+  taller_diagnostico?: {
+    diagnostico?: string | null;
+    servicios?: string | null;
+    horas?: string | null;
+    materiales?: string | null;
+  };
+  flujo_mantenimiento?: {
+    repuestos_solicitados?: {
+      nombre?: string | null;
+      cantidad?: number | null;
+    }[];
+    timeline?: Record<string, string | null>;
+    confirmaciones?: Record<string, boolean | string | null>;
+    encuesta_satisfaccion?: {
+      calificacion?: number | null;
+      comentario?: string | null;
+      fecha?: string | null;
+      cliente_nombre?: string | null;
+    };
   };
   respuesta_taller?: {
     comentario?: string | null;
@@ -110,6 +139,31 @@ type Notificacion = {
   mensaje?: string;
   tipo?: string;
   leida?: boolean;
+};
+
+const formatWorkshopDateLabel = (value?: string | null) => {
+  if (!value) return "Sin fecha";
+  const [year, month, day] = String(value).split("-").map(Number);
+  if (!year || !month || !day) return String(value);
+  const date = new Date(year, month - 1, day);
+  return date.toLocaleDateString("es-CO", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+const formatWorkshopTimeLabel = (value?: string | null) => {
+  if (!value) return "Sin horario";
+  const [hours, minutes] = String(value).split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return String(value);
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date.toLocaleTimeString("es-CO", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 };
 
 const filterVisibleClientRequests = (items: Solicitud[]) => {
@@ -158,20 +212,40 @@ const filterVisibleClientRequests = (items: Solicitud[]) => {
               ? [selectedOffer]
               : childOffers;
 
-      const respuestas = visibleOffers.map((offer, index) => {
-        const respuesta = offer.cotizacion?.respuestas?.[0];
-        return {
+      const respuestas = visibleOffers.flatMap((offer, index) => {
+        if (offer.cotizacion?.respuestas?.length) {
+          return offer.cotizacion.respuestas.map((respuesta) => ({
+            solicitud_id: offer.id,
+            proveedor_id: offer.cotizacion?.proveedor_id || respuesta?.proveedor_id || null,
+            proveedor_nombre: respuesta?.proveedor_nombre || `Oferta ${String.fromCharCode(65 + index)}`,
+            response_index: respuesta?.response_index ?? 0,
+            marca: respuesta?.marca || offer.cotizacion?.marca || null,
+            referencia: respuesta?.referencia || offer.cotizacion?.referencia || null,
+            garantia: respuesta?.garantia || offer.cotizacion?.garantia || null,
+            disponibilidad: respuesta?.disponibilidad || offer.cotizacion?.disponibilidad || null,
+            precio: respuesta?.precio || offer.cotizacion?.precio || null,
+            observacion: respuesta?.observacion || offer.cotizacion?.observacion || null,
+            documento_excel_nombre: null,
+            documento_excel_mime: null,
+            documento_excel_base64: null,
+          }));
+        }
+
+        return [{
           solicitud_id: offer.id,
-          proveedor_id: offer.cotizacion?.proveedor_id || respuesta?.proveedor_id || null,
+          proveedor_id: offer.cotizacion?.proveedor_id || null,
           proveedor_nombre: `Oferta ${String.fromCharCode(65 + index)}`,
-          response_index: respuesta?.response_index ?? 0,
-          marca: respuesta?.marca || offer.cotizacion?.marca || null,
-          referencia: respuesta?.referencia || offer.cotizacion?.referencia || null,
-          garantia: respuesta?.garantia || offer.cotizacion?.garantia || null,
-          disponibilidad: respuesta?.disponibilidad || offer.cotizacion?.disponibilidad || null,
-          precio: respuesta?.precio || offer.cotizacion?.precio || null,
-          observacion: respuesta?.observacion || offer.cotizacion?.observacion || null,
-        };
+          response_index: 0,
+          marca: offer.cotizacion?.marca || null,
+          referencia: offer.cotizacion?.referencia || null,
+          garantia: offer.cotizacion?.garantia || null,
+          disponibilidad: offer.cotizacion?.disponibilidad || null,
+          precio: offer.cotizacion?.precio || null,
+          observacion: offer.cotizacion?.observacion || null,
+          documento_excel_nombre: null,
+          documento_excel_mime: null,
+          documento_excel_base64: null,
+        }];
       });
 
       const solicitudAccionId =
@@ -190,6 +264,8 @@ const filterVisibleClientRequests = (items: Solicitud[]) => {
         },
         respuesta_taller: selectedOffer.respuesta_taller || root.respuesta_taller,
         respuesta_proveedor: selectedOffer.respuesta_proveedor || root.respuesta_proveedor,
+        taller_diagnostico: selectedOffer.taller_diagnostico || root.taller_diagnostico,
+        flujo_mantenimiento: selectedOffer.flujo_mantenimiento || root.flujo_mantenimiento,
         accion_solicitud_id: solicitudAccionId,
       };
     })
@@ -237,7 +313,7 @@ export default function Dashboard() {
   const [talleres, setTalleres] = useState<Taller[]>([]);
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [userName, setUserName] = useState("Usuario");
-  const [selectedSection, setSelectedSection] = useState("Panel de control");
+  const [selectedSection, setSelectedSection] = useState("Mis servicios");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
@@ -246,6 +322,9 @@ export default function Dashboard() {
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const [serviceStatusFilter, setServiceStatusFilter] = useState<string>("Todos");
   const [newKilometraje, setNewKilometraje] = useState("");
+  const [actionLoadingMessage, setActionLoadingMessage] = useState<string | null>(null);
+  const [surveyRequestId, setSurveyRequestId] = useState<string | null>(null);
+  const [surveyRating, setSurveyRating] = useState<number>(0);
 
   const redirigirAlLogin = () => {
     if (Platform.OS === "web") {
@@ -379,7 +458,7 @@ export default function Dashboard() {
       // Optimización: polling cada 30 segundos en lugar de 8 para reducir carga
       const interval = setInterval(() => {
         cargarDatos();
-      }, 30000);
+      }, 8000);
 
       return () => clearInterval(interval);
     }, [])
@@ -412,7 +491,7 @@ export default function Dashboard() {
   const filteredSolicitudesActivas = (serviceStatusFilter === "Todos"
     ? solicitudesActivas
     : solicitudesActivas.filter(
-        (item) => renderEstadoServicio(item.estado).label === serviceStatusFilter
+        (item) => renderEstadoServicio(item).label === serviceStatusFilter
       )).sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
 
   const extraerSolicitudId = (mensaje?: string) => {
@@ -462,10 +541,21 @@ export default function Dashboard() {
       .map((item) => item.trim())
       .filter(Boolean);
 
-    return partes.some(
-      (parte) =>
-        !isQuoteWorkflowService(parte)
-    );
+    return partes.some((parte) => !isQuoteWorkflowService(parte));
+  };
+
+  const tieneSolicitudMantenimientoActiva = (vehicleId: string | number | undefined) => {
+    if (vehicleId == null) return false;
+
+    return solicitudes.some((item) => {
+      const estado = normalizeStatus(item.estado);
+
+      return (
+        String(item.vehiculo?.id) === String(vehicleId) &&
+        !isHistoryStatus(estado) &&
+        esSolicitudMantenimiento(item.tipo_servicio)
+      );
+    });
   };
 
   const tieneSolicitudPendientePorServicio = (
@@ -495,55 +585,28 @@ export default function Dashboard() {
     });
   };
 
-  const tieneSolicitudMantenimientoActiva = (vehicleId: string | number | undefined) => {
-    if (vehicleId == null) return false;
-
-    return solicitudes.some((item) => {
-      const estado = normalizeStatus(item.estado);
-
-      return (
-        String(item.vehiculo?.id) === String(vehicleId) &&
-        !isHistoryStatus(estado) &&
-        esSolicitudMantenimiento(item.tipo_servicio)
-      );
-    });
-  };
-
-  const tieneSolicitudRapidaActiva = (vehicleId: string | number | undefined) => {
-    if (vehicleId == null) return false;
-
-    return solicitudes.some((item) => {
-      const estado = normalizeStatus(item.estado);
-      const servicio = normalizarTexto(item.tipo_servicio);
-
-      return (
-        String(item.vehiculo?.id) === String(vehicleId) &&
-        isQuoteWorkflowService(servicio) &&
-        !isHistoryStatus(estado)
-      );
-    });
-  };
-
   const eliminarVehiculo = async (vehicleId: string | number) => {
     try {
-      const token = await storage.getItem("token");
+      await withActionLoading("Eliminando vehiculo...", async () => {
+        const token = await storage.getItem("token");
 
-      const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          alert("No se pudo eliminar el vehiculo" + (data ? `: ${JSON.stringify(data)}` : ""));
+          return;
+        }
+
+        await cargarDatos();
+        setSelectedVehicleId(null);
+        alert("Vehiculo eliminado correctamente");
       });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        alert("No se pudo eliminar el vehiculo" + (data ? `: ${JSON.stringify(data)}` : ""));
-        return;
-      }
-
-      await cargarDatos();
-      setSelectedVehicleId(null);
-      alert("Vehiculo eliminado correctamente");
     } catch (error) {
       console.log("Error eliminando vehiculo", error);
       alert("Error eliminando el vehiculo");
@@ -612,29 +675,31 @@ export default function Dashboard() {
     }
 
     try {
-      const token = await storage.getItem("token");
+      await withActionLoading("Actualizando kilometraje...", async () => {
+        const token = await storage.getItem("token");
 
-      const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}/kilometraje`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          kilometraje: value,
-        }),
+        const response = await fetch(`${API_BASE_URL}/vehiculos/${vehicleId}/kilometraje`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            kilometraje: value,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert("No se pudo actualizar el kilometraje" + (data?.detail ? `: ${data.detail}` : ""));
+          return;
+        }
+
+        setEditingVehicleId(null);
+        await cargarDatos();
+        alert("Kilometraje actualizado correctamente");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        alert("No se pudo actualizar el kilometraje" + (data?.detail ? `: ${data.detail}` : ""));
-        return;
-      }
-
-      setEditingVehicleId(null);
-      await cargarDatos();
-      alert("Kilometraje actualizado correctamente");
     } catch (error) {
       console.log("Error actualizando kilometraje", error);
       alert("Error conectando con el servidor");
@@ -648,31 +713,33 @@ export default function Dashboard() {
     }
 
     try {
-      const token = await storage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/solicitudes`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          vehiculo_id: Number(vehicle.id),
-          tipo: serviceTitle.replace("\n", " "),
-          descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
-          disponibilidad_cliente: "Por coordinar con el cliente",
-        }),
+      await withActionLoading("Creando solicitud...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            vehiculo_id: Number(vehicle.id),
+            tipo: serviceTitle.replace("\n", " "),
+            descripcion: `Solicitud de ${serviceTitle.replace("\n", " ")}`.slice(0, 50),
+            disponibilidad_cliente: "Por coordinar con el cliente",
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert("No se pudo crear la solicitud" + (data?.detail ? `: ${data.detail}` : ""));
+          return;
+        }
+
+        await cargarDatos();
+        setSelectedSection("Panel de control");
+        alert("Solicitud enviada al administrador correctamente");
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        alert("No se pudo crear la solicitud" + (data?.detail ? `: ${data.detail}` : ""));
-        return;
-      }
-
-      await cargarDatos();
-      setSelectedSection("Panel de control");
-      alert("Solicitud enviada al administrador correctamente");
     } catch (error) {
       console.log("Error creando solicitud rapida", error);
       alert("Error conectando con el servidor");
@@ -792,8 +859,8 @@ export default function Dashboard() {
                       service.quickRequest
                         ? tieneSolicitudPendientePorServicio(item.id, service.title)
                         : service.route === "/service-request"
-                          ? tieneSolicitudMantenimientoActiva(item.id)
-                          : false;
+                        ? tieneSolicitudMantenimientoActiva(item.id)
+                        : false;
 
                     return (
                       <TouchableOpacity
@@ -871,16 +938,28 @@ export default function Dashboard() {
     </View>
   );
 
-  function renderEstadoServicio(estado?: string) {
+  function renderEstadoServicio(itemOrEstado?: Solicitud | string) {
+    const item =
+      typeof itemOrEstado === "object" && itemOrEstado != null ? itemOrEstado : undefined;
+    const estado = typeof itemOrEstado === "string" ? itemOrEstado : item?.estado;
     const normalizado = normalizeStatus(estado);
+    const esMantenimientoConAprobacionClientePendiente =
+      Boolean(item?.flujo_mantenimiento?.timeline?.cliente_aprueba_propuesta_en) &&
+      !Boolean(item?.flujo_mantenimiento?.timeline?.cliente_finaliza_servicio_en) &&
+      !isFinishedStatus(normalizado);
+
     let label = getStatusLabel(normalizado);
+
+    if (esMantenimientoConAprobacionClientePendiente) {
+      label = "Aprobada";
+    }
 
     if (normalizado === "en_asignacion_taller") {
       label = "En asignacion de taller";
     }
 
     if (normalizado === "pendiente_envio_cliente_taller") {
-      label = "Coordinando visita al taller";
+      label = "Esperando confirmacion del cliente";
     }
 
     if (isQuotedStatus(normalizado)) {
@@ -888,7 +967,7 @@ export default function Dashboard() {
     }
 
     if (isSentToClientStatus(normalizado)) {
-      label = "Cotizada";
+      label = "Enviada al cliente";
     }
 
     if (isWaitingClientStatus(normalizado)) {
@@ -910,7 +989,8 @@ export default function Dashboard() {
       isProposalReadyStatus(normalizado) ||
       isSentToClientStatus(normalizado) ||
       normalizado === "aprobada" ||
-      isWaitingClientStatus(normalizado)
+      isWaitingClientStatus(normalizado) ||
+      esMantenimientoConAprobacionClientePendiente
     ) {
       return { label, backgroundColor: "#dcfce7", color: "#15803d" };
     }
@@ -950,6 +1030,7 @@ export default function Dashboard() {
           respuesta.disponibilidad,
           respuesta.precio,
           respuesta.observacion,
+          respuesta.documento_excel_nombre,
         ].some((value) => String(value || "").trim().length > 0)
       );
 
@@ -984,28 +1065,110 @@ export default function Dashboard() {
       disponibilidad: disponibilidades[index] || null,
       precio: precios[index] || null,
       observacion: observaciones[index] || null,
+      documento_excel_nombre: item.cotizacion?.documento_excel_nombre || null,
+      documento_excel_mime: item.cotizacion?.documento_excel_mime || null,
+      documento_excel_base64: item.cotizacion?.documento_excel_base64 || null,
     }));
   };
 
-  const solicitudPermitePago = (item: Solicitud) => {
-    const estado = (item.estado || "").toLowerCase();
-    const servicio = normalizarTexto(item.tipo_servicio);
+  const agruparRespuestasClientePorProveedor = (respuestas: ReturnType<typeof obtenerRespuestasCliente>) => {
+    const grouped = new Map<string, {
+      solicitud_id: string | number | null;
+      proveedor_id: string | number | null;
+      proveedor_nombre: string | null;
+      respuestas: typeof respuestas;
+    }>();
 
-    return (
-      isSentToClientStatus(estado) &&
-      isQuoteWorkflowService(servicio)
+    respuestas.forEach((respuesta, index) => {
+      const key = String(respuesta.proveedor_id ?? `sin-proveedor-${index}`);
+      const current = grouped.get(key);
+
+      if (current) {
+        current.respuestas.push(respuesta);
+        return;
+      }
+
+      grouped.set(key, {
+        solicitud_id: respuesta.solicitud_id ?? null,
+        proveedor_id: respuesta.proveedor_id ?? null,
+        proveedor_nombre: `Oferta ${String.fromCharCode(65 + grouped.size)}`,
+        respuestas: [respuesta],
+      });
+    });
+
+    return Array.from(grouped.values());
+  };
+
+  const parseCurrencyValue = (value?: string | null) => {
+    const normalized = String(value || "")
+      .replace(/[^\d,.-]/g, "")
+      .replace(/\.(?=\d{3}(?:\D|$))/g, "")
+      .replace(",", ".");
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const parseHoursValue = (value?: string | null) => {
+    const normalized = String(value || "")
+      .replace(/[^\d,.-]/g, "")
+      .replace(",", ".");
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const calcularTotalCotizacionCliente = (
+    respuestas: ReturnType<typeof obtenerRespuestasCliente>,
+    item: Solicitud
+  ) => {
+    const totalRepuestos = respuestas.reduce(
+      (sum, respuesta) => sum + parseCurrencyValue(respuesta.precio),
+      0
     );
+    const horas = parseHoursValue(item.taller_diagnostico?.horas);
+    return totalRepuestos + horas * 100000;
+  };
+
+  const solicitudPermiteAprobacion = (item: Solicitud) => {
+    const estado = (item.estado || "").toLowerCase();
+    return isSentToClientStatus(estado);
   };
 
   const solicitudPermiteLlegadaTaller = (item: Solicitud) => {
     const estado = normalizeStatus(item.estado);
-    return isQuoteWorkflowService(item.tipo_servicio) && isWaitingClientStatus(estado);
+    return (
+      esSolicitudMantenimiento(item.tipo_servicio) &&
+      (isWaitingClientStatus(estado) || estado === "pendiente_envio_cliente_taller")
+    );
+  };
+
+  const solicitudPermiteFinalizacionCliente = (item: Solicitud) => {
+    const confirmaciones = item.flujo_mantenimiento?.confirmaciones || {};
+    const timeline = item.flujo_mantenimiento?.timeline || {};
+    const estado = normalizeStatus(item.estado);
+    const haAprobado = Boolean(timeline.cliente_aprueba_propuesta_en) || isApprovedStatus(estado);
+    const tallerFinalizo = Boolean(confirmaciones.taller_reparacion_finalizada);
+    return (
+      esSolicitudMantenimiento(item.tipo_servicio) &&
+      haAprobado &&
+      tallerFinalizo &&
+      !isFinishedStatus(item.estado)
+    );
+  };
+
+  const withActionLoading = async <T,>(message: string, action: () => Promise<T>) => {
+    try {
+      setActionLoadingMessage(message);
+      return await action();
+    } finally {
+      setActionLoadingMessage(null);
+    }
   };
 
   const aprobarSolicitudCliente = async (solicitudId: string | number | undefined) => {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Aprobando solicitud...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/aprobar-cliente`, {
         method: "PATCH",
@@ -1022,7 +1185,8 @@ export default function Dashboard() {
       }
 
       await cargarDatos();
-      Alert.alert("Aprobada", "La solicitud fue aprobada y ahora pasa a ejecucion.");
+      Alert.alert("Aprobada", "La solicitud fue aprobada y se notifico al administrador, taller y proveedor.");
+      });
     } catch (error) {
       console.log("Error aprobando solicitud cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -1033,6 +1197,7 @@ export default function Dashboard() {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Rechazando solicitud...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/rechazar-oferta-cliente`, {
         method: "PATCH",
@@ -1050,6 +1215,7 @@ export default function Dashboard() {
 
       await cargarDatos();
       Alert.alert("Oferta rechazada", "La oferta fue rechazada y se oculto del cliente.");
+      });
     } catch (error) {
       console.log("Error rechazando oferta cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
@@ -1060,6 +1226,7 @@ export default function Dashboard() {
     if (solicitudId == null) return;
 
     try {
+      await withActionLoading("Confirmando llegada al taller...", async () => {
       const token = await storage.getItem("token");
       const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/llegada-taller`, {
         method: "PATCH",
@@ -1076,9 +1243,49 @@ export default function Dashboard() {
       }
 
       await cargarDatos();
-      Alert.alert("Llegada confirmada", "La solicitud paso a estado en reparacion.");
+      Alert.alert("Llegada confirmada", "El taller ya puede iniciar el diagnostico.");
+      });
     } catch (error) {
       console.log("Error confirmando llegada al taller", error);
+      Alert.alert("Error", "No se pudo conectar con el servidor");
+    }
+  };
+
+  const finalizarSolicitudCliente = async (solicitudId: string | number | undefined) => {
+    if (solicitudId == null) return;
+    if (!surveyRating) {
+      Alert.alert("Calificacion requerida", "Debes seleccionar una calificacion para finalizar.");
+      return;
+    }
+
+    try {
+      await withActionLoading("Finalizando servicio...", async () => {
+        const token = await storage.getItem("token");
+        const response = await fetch(`${API_BASE_URL}/solicitudes/${solicitudId}/finalizar-cliente`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            calificacion: surveyRating,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          Alert.alert("Error", data.detail || "No se pudo finalizar la solicitud");
+          return;
+        }
+
+        setSurveyRequestId(null);
+        setSurveyRating(0);
+        await cargarDatos();
+        Alert.alert("Servicio finalizado", "Gracias por confirmar la finalizacion del servicio.");
+      });
+    } catch (error) {
+      console.log("Error finalizando solicitud cliente", error);
       Alert.alert("Error", "No se pudo conectar con el servidor");
     }
   };
@@ -1121,6 +1328,35 @@ export default function Dashboard() {
     "Finalizada",
   ];
 
+  const obtenerResumenProblema = (value?: string | null) => {
+    const text = String(value || "").trim();
+    if (!text) return "Sin detalle registrado";
+    return text.length > 72 ? `${text.slice(0, 72).trim()}...` : text;
+  };
+
+  const obtenerTrackingIntervencion = (item: Solicitud) => {
+    const confirmaciones = item.flujo_mantenimiento?.confirmaciones || {};
+
+    return [
+      {
+        label: "Proveedor despacho repuestos",
+        completed: Boolean(confirmaciones.proveedor_despacho_confirmado),
+      },
+      {
+        label: "Taller inicio intervencion",
+        completed: Boolean(confirmaciones.taller_inicio_intervencion_confirmado),
+      },
+      {
+        label: "Taller recibio repuestos",
+        completed: Boolean(confirmaciones.taller_recibe_repuestos_confirmado),
+      },
+      {
+        label: "Reparacion final",
+        completed: Boolean(confirmaciones.taller_reparacion_finalizada),
+      },
+    ];
+  };
+
   const renderServicesSection = () => {
     if (solicitudesActivas.length === 0) {
       return (
@@ -1136,38 +1372,62 @@ export default function Dashboard() {
 
     return (
       <View style={styles.servicesListSection}>
-        <View style={styles.filterWrap}>
-          {filtrosEstadoCliente.map((filter) => (
-            <TouchableOpacity
-              key={filter}
-              style={[
-                styles.filterChip,
-                serviceStatusFilter === filter && styles.filterChipActive,
-              ]}
-              onPress={() => setServiceStatusFilter(filter)}
-            >
-              <Text
+        <View style={styles.moduleHeaderCard}>
+          <View style={styles.moduleHeaderText}>
+            <Text style={styles.moduleHeaderTitle}>Modulo: Ordenes</Text>
+            <Text style={styles.moduleHeaderSubtitle}>
+              Gestion centralizada de la operacion del sistema.
+            </Text>
+          </View>
+          <View style={styles.moduleHeaderBadge}>
+            <MaterialCommunityIcons name="clipboard-list-outline" size={18} color="#2563eb" />
+            <Text style={styles.moduleHeaderBadgeText}>{filteredSolicitudesActivas.length}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.servicesSectionTitle}>Solicitudes</Text>
+
+        <View style={styles.filterToolbar}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterWrap}
+          >
+            {filtrosEstadoCliente.map((filter) => (
+              <TouchableOpacity
+                key={filter}
                 style={[
-                  styles.filterChipText,
-                  serviceStatusFilter === filter && styles.filterChipTextActive,
+                  styles.filterChip,
+                  serviceStatusFilter === filter && styles.filterChipActive,
                 ]}
+                onPress={() => setServiceStatusFilter(filter)}
               >
-                {filter}
-              </Text>
-            </TouchableOpacity>
-          ))}
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    serviceStatusFilter === filter && styles.filterChipTextActive,
+                  ]}
+                >
+                  {filter}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <TouchableOpacity style={styles.filterActionButton} activeOpacity={0.9}>
+            <MaterialCommunityIcons name="tune-variant" size={18} color="#1f2937" />
+          </TouchableOpacity>
         </View>
         {filteredSolicitudesActivas.map((item) => {
-          const estadoInfo = renderEstadoServicio(item.estado);
+          const estadoInfo = renderEstadoServicio(item);
           const respuestasCliente = obtenerRespuestasCliente(item);
           const expanded = expandedServiceId === String(item.id);
-          const mostrarTalleres =
-            isSentToClientStatus(item.estado) && esSolicitudMantenimiento(item.tipo_servicio);
+          const mostrarTalleres = false;
+          const trackingSteps = obtenerTrackingIntervencion(item);
 
           return (
             <TouchableOpacity
               key={String(item.id)}
-              style={styles.serviceRequestCard}
+              style={[styles.serviceRequestCard, expanded && styles.serviceRequestCardExpanded]}
               activeOpacity={0.96}
               onPress={() =>
                 setExpandedServiceId((current) => (current === String(item.id) ? null : String(item.id)))
@@ -1176,14 +1436,23 @@ export default function Dashboard() {
               <View style={styles.serviceRequestHeader}>
                 <View style={styles.serviceRequestHeaderContent}>
                   <Text style={styles.serviceRequestTitle}>{obtenerTituloSolicitud(item)}</Text>
-                    <Text style={styles.serviceRequestVehicle}>
+                  <Text style={styles.serviceRequestVehicle}>
                     {`${item.vehiculo?.marca || ""} ${item.vehiculo?.modelo || ""}`.trim() ||
                       "Vehiculo"}
                     {item.vehiculo?.placa ? ` • ${item.vehiculo.placa}` : ""}
                     </Text>
-                  <Text style={styles.serviceRequestMeta}>
-                    Fecha y hora de creacion: {formatDateTime(item.fecha)}
-                  </Text>
+                  <View style={styles.serviceMetaList}>
+                    <View style={styles.serviceMetaRow}>
+                      <MaterialCommunityIcons name="calendar-blank-outline" size={16} color="#6b7280" />
+                      <Text style={styles.serviceMetaItemText}>{formatDateTime(item.fecha)}</Text>
+                    </View>
+                    <View style={styles.serviceMetaRow}>
+                      <MaterialCommunityIcons name="tools" size={16} color="#6b7280" />
+                      <Text style={styles.serviceMetaItemText}>
+                        Problema: {obtenerResumenProblema(item.problema)}
+                      </Text>
+                    </View>
+                  </View>
                 </View>
 
                 <View
@@ -1203,9 +1472,20 @@ export default function Dashboard() {
                   <Text style={styles.serviceRequestDescription}>
                     {item.problema || "Solicitud enviada al administrador para revision."}
                   </Text>
-                  <Text style={styles.serviceRequestDescription}>
-                    Disponibilidad registrada: {item.disponibilidad_cliente || "Sin registrar"}
-                  </Text>
+                  {item.respuesta_taller?.fecha_disponible || item.respuesta_taller?.horario_disponible ? (
+                    <>
+                      <Text style={styles.serviceRequestDescription}>
+                        Fecha propuesta por el taller: {formatWorkshopDateLabel(item.respuesta_taller?.fecha_disponible)}
+                      </Text>
+                      <Text style={styles.serviceRequestDescription}>
+                        Horario propuesto por el taller: {formatWorkshopTimeLabel(item.respuesta_taller?.horario_disponible)}
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={styles.serviceRequestDescription}>
+                      Disponibilidad registrada: {item.disponibilidad_cliente || "Sin registrar"}
+                    </Text>
+                  )}
                   <Text style={styles.serviceRequestMeta}>Solicitud #{obtenerNumeroCaso(item)}</Text>
                 </>
               ) : null}
@@ -1215,38 +1495,70 @@ export default function Dashboard() {
 
               {expanded && isSentToClientStatus(item.estado) && respuestasCliente.length ? (
                 <View style={styles.clientQuoteList}>
-                  {respuestasCliente.map((respuesta, index) => (
-                    <View key={`quote-${item.id}-${index}`} style={styles.clientQuoteCard}>
+                  {agruparRespuestasClientePorProveedor(respuestasCliente).map((grupo, index) => (
+                    <View key={`quote-${item.id}-${grupo.proveedor_id ?? index}`} style={styles.clientQuoteCard}>
                       <Text style={styles.clientQuoteTitle}>
-                        {respuesta.proveedor_nombre || `Cotizacion ${index + 1}`}
-                      </Text>
-                      <Text style={styles.serviceRequestDescription}>Marca: {respuesta.marca || "Sin marca"}</Text>
-                      <Text style={styles.serviceRequestDescription}>
-                        Referencia: {respuesta.referencia || "Sin referencia"}
+                        {grupo.proveedor_nombre || `Cotizacion ${index + 1}`}
                       </Text>
                       <Text style={styles.serviceRequestDescription}>
-                        Garantia: {respuesta.garantia || "Sin garantia"}
+                        Repuestos cotizados: {grupo.respuestas.length}
                       </Text>
-                      <Text style={styles.serviceRequestDescription}>
-                        Disponibilidad: {respuesta.disponibilidad || "Sin disponibilidad"}
+                      {(item.taller_diagnostico?.diagnostico || item.taller_diagnostico?.servicios || item.taller_diagnostico?.horas || item.taller_diagnostico?.materiales) ? (
+                        <View style={styles.clientQuoteDiagnosticBlock}>
+                          <Text style={styles.clientQuoteDiagnosticTitle}>Diagnostico del taller</Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Horas estimadas: {item.taller_diagnostico?.horas || "Sin horas"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Repuestos solicitados: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                          </Text>
+                        </View>
+                      ) : null}
+                      {grupo.respuestas.map((respuesta, respuestaIndex) => (
+                        <View
+                          key={`quote-detail-${item.id}-${grupo.proveedor_id ?? index}-${respuestaIndex}`}
+                          style={styles.clientQuoteItem}
+                        >
+                          <Text style={styles.serviceRequestDescription}>Marca: {respuesta.marca || "Sin marca"}</Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Referencia: {respuesta.referencia || "Sin referencia"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Garantia: {respuesta.garantia || "Sin garantia"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Disponibilidad: {respuesta.disponibilidad || "Sin disponibilidad"}
+                          </Text>
+                          <Text style={styles.serviceRequestDescription}>Precio: {respuesta.precio || "0"}</Text>
+                          <Text style={styles.serviceRequestDescription}>
+                            Observacion: {respuesta.observacion || "Sin observacion"}
+                          </Text>
+                        </View>
+                      ))}
+                      <Text style={styles.clientQuoteTotal}>
+                        Valor total: {formatCurrency(calcularTotalCotizacionCliente(grupo.respuestas, item))}
                       </Text>
-                      <Text style={styles.serviceRequestDescription}>Precio: {respuesta.precio || "0"}</Text>
-                      <Text style={styles.serviceRequestDescription}>
-                        Observacion: {respuesta.observacion || "Sin observacion"}
-                      </Text>
-                      {solicitudPermitePago(item) ? (
+                      {solicitudPermiteAprobacion(item) ? (
                         <View style={styles.clientQuoteActions}>
                           <TouchableOpacity
                             style={styles.payButton}
-                            onPress={() => aprobarSolicitudCliente(respuesta.solicitud_id || item.accion_solicitud_id || item.id)}
+                            onPress={() => aprobarSolicitudCliente(grupo.solicitud_id || item.accion_solicitud_id || item.id)}
                           >
-                            <Text style={styles.payButtonText}>Pagar</Text>
+                            <Text style={styles.payButtonText}>
+                              {esSolicitudMantenimiento(item.tipo_servicio) ? "Aprobar propuesta" : "Pagar"}
+                            </Text>
                           </TouchableOpacity>
                         </View>
                       ) : null}
                     </View>
                   ))}
-                  {solicitudPermitePago(item) ? (
+                  {solicitudPermiteAprobacion(item) ? (
                     <TouchableOpacity
                       style={styles.rejectOfferButton}
                       onPress={() => rechazarOfertaCliente(item.accion_solicitud_id || item.id)}
@@ -1264,6 +1576,52 @@ export default function Dashboard() {
                 >
                   <Text style={styles.arrivalButtonText}>Llegada a taller</Text>
                 </TouchableOpacity>
+              ) : null}
+
+              {expanded && solicitudPermiteFinalizacionCliente(item) ? (
+                <TouchableOpacity
+                  style={styles.payButton}
+                  onPress={() => {
+                    setSurveyRequestId(String(item.accion_solicitud_id || item.id));
+                    setSurveyRating(0);
+                  }}
+                >
+                  <Text style={styles.payButtonText}>Finalizar servicio</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              {expanded && esSolicitudMantenimiento(item.tipo_servicio) && item.flujo_mantenimiento?.repuestos_solicitados?.length ? (
+                <View style={styles.workshopListCard}>
+                  <Text style={styles.workshopListTitle}>Repuestos solicitados</Text>
+                  {item.flujo_mantenimiento.repuestos_solicitados.map((repuesto, index) => (
+                    <Text key={`${item.id}-repuesto-${index}`} style={styles.serviceRequestDescription}>
+                      {(repuesto.nombre || "Repuesto").trim()} x{repuesto.cantidad || 0}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
+              {expanded &&
+              isDiagnosedStatus(item.estado) &&
+              (item.taller_diagnostico?.diagnostico ||
+                item.taller_diagnostico?.servicios ||
+                item.taller_diagnostico?.horas ||
+                item.taller_diagnostico?.materiales) ? (
+                <View style={styles.clientQuoteDiagnosticBlock}>
+                  <Text style={styles.clientQuoteDiagnosticTitle}>Diagnostico del taller</Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Diagnostico: {item.taller_diagnostico?.diagnostico || "Sin diagnostico"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Servicios: {item.taller_diagnostico?.servicios || "Sin servicios"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Horas: {item.taller_diagnostico?.horas || "Sin horas"}
+                  </Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Materiales: {item.taller_diagnostico?.materiales || "Sin materiales"}
+                  </Text>
+                </View>
               ) : null}
 
               {expanded && mostrarTalleres ? (
@@ -1295,17 +1653,55 @@ export default function Dashboard() {
                 </View>
               ) : null}
 
-              {expanded && item.respuesta_taller?.fecha_disponible ? (
+              {expanded && (item.respuesta_taller?.fecha_disponible || item.respuesta_taller?.horario_disponible || item.respuesta_taller?.comentario) ? (
                 <View style={styles.clientQuoteCard}>
                   <Text style={styles.clientQuoteTitle}>Informacion para acercarte al taller</Text>
                   <Text style={styles.serviceRequestDescription}>
-                    Fecha disponible: {item.respuesta_taller.fecha_disponible || "Sin fecha"}
+                    Fecha disponible: {formatWorkshopDateLabel(item.respuesta_taller.fecha_disponible)}
                   </Text>
                   <Text style={styles.serviceRequestDescription}>
-                    Horario disponible: {item.respuesta_taller.horario_disponible || "Sin horario"}
+                    Horario disponible: {formatWorkshopTimeLabel(item.respuesta_taller.horario_disponible)}
                   </Text>
                   <Text style={styles.serviceRequestDescription}>
                     Comentario del taller: {item.respuesta_taller.comentario || item.observacion || "Sin comentario"}
+                  </Text>
+                </View>
+              ) : null}
+
+              {expanded && esSolicitudMantenimiento(item.tipo_servicio) ? (
+                <View style={styles.workshopListCard}>
+                  <Text style={styles.workshopListTitle}>Seguimiento de la intervencion</Text>
+                  {trackingSteps.map((step) => (
+                    <View key={`${item.id}-${step.label}`} style={styles.timelineStep}>
+                      <View
+                        style={[
+                          styles.timelineIcon,
+                          step.completed && styles.timelineIconCompleted,
+                        ]}
+                      >
+                        <MaterialCommunityIcons
+                          name={step.completed ? "check" : "clock-outline"}
+                          size={14}
+                          color={step.completed ? "#1d4ed8" : "#64748b"}
+                        />
+                      </View>
+                      <View style={styles.timelineTextGroup}>
+                        <Text style={styles.timelineLabel}>{step.label}</Text>
+                        <Text style={styles.timelineState}>
+                          {step.completed ? "Confirmado" : "Pendiente"}
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              {expanded && item.flujo_mantenimiento?.encuesta_satisfaccion?.calificacion ? (
+                <View style={styles.clientQuoteCard}>
+                  <Text style={styles.clientQuoteTitle}>Calificacion registrada</Text>
+                  <Text style={styles.serviceRequestDescription}>
+                    Calificacion: {"★".repeat(Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
+                    {"☆".repeat(5 - Number(item.flujo_mantenimiento.encuesta_satisfaccion.calificacion || 0))}
                   </Text>
                 </View>
               ) : null}
@@ -1399,6 +1795,44 @@ export default function Dashboard() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <Modal transparent visible={Boolean(actionLoadingMessage)} animationType="fade">
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={styles.loadingText}>{actionLoadingMessage || "Procesando..."}</Text>
+          </View>
+        </View>
+      </Modal>
+      <Modal transparent visible={Boolean(surveyRequestId)} animationType="fade">
+        <View style={styles.loadingOverlay}>
+          <View style={styles.surveyCard}>
+            <Text style={styles.surveyTitle}>Encuesta de satisfaccion</Text>
+            <Text style={styles.surveyText}>¿Como calificas el servicio recibido?</Text>
+            <View style={styles.surveyStarsRow}>
+              {[1, 2, 3, 4, 5].map((value) => (
+                <TouchableOpacity key={value} onPress={() => setSurveyRating(value)}>
+                  <MaterialCommunityIcons
+                    name={value <= surveyRating ? "star" : "star-outline"}
+                    size={32}
+                    color={value <= surveyRating ? "#f59e0b" : "#94a3b8"}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.surveyActions}>
+              <TouchableOpacity style={styles.kmCancelButton} onPress={() => setSurveyRequestId(null)}>
+                <Text style={styles.kmCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.kmSaveButton}
+                onPress={() => finalizarSolicitudCliente(surveyRequestId)}
+              >
+                <Text style={styles.kmSaveText}>Enviar y finalizar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <View style={styles.dashboardLayout}>
         <View style={styles.mainContent}>
           <View style={styles.menuWrapper}>
@@ -1483,6 +1917,13 @@ export default function Dashboard() {
                     >
                       {section}
                     </Text>
+                    {!isBlocked ? (
+                      <MaterialCommunityIcons
+                        name="chevron-right"
+                        size={18}
+                        color={selectedSection === section ? "#08121f" : "#8fa1c2"}
+                      />
+                    ) : null}
                     {isBlocked ? (
                       <MaterialCommunityIcons name="lock-outline" size={16} color="#8fa1c2" />
                     ) : null}
@@ -1491,6 +1932,16 @@ export default function Dashboard() {
                   })()
                 ))}
 
+                <TouchableOpacity
+                  style={styles.logoutButton}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    cerrarSesion();
+                  }}
+                >
+                  <MaterialCommunityIcons name="power" size={18} color="#ff7a6f" />
+                  <Text style={styles.logoutButtonText}>Cerrar sesion</Text>
+                </TouchableOpacity>
               </View>
             ) : null}
           </View>
@@ -1955,8 +2406,23 @@ const styles = StyleSheet.create({
   },
   filterWrap: {
     flexDirection: "row",
-    flexWrap: "wrap",
     gap: 10,
+    paddingRight: 12,
+  },
+  filterToolbar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  filterActionButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#dbe4f0",
+    alignItems: "center",
+    justifyContent: "center",
   },
   filterChip: {
     backgroundColor: "#eef3f9",
@@ -2022,6 +2488,50 @@ const styles = StyleSheet.create({
     marginTop: 18,
     gap: 14,
   },
+  moduleHeaderCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 24,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#e8edf6",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+  },
+  moduleHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  moduleHeaderTitle: {
+    color: "#102447",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  moduleHeaderSubtitle: {
+    color: "#64748b",
+    lineHeight: 18,
+  },
+  moduleHeaderBadge: {
+    minWidth: 44,
+    height: 44,
+    borderRadius: 16,
+    backgroundColor: "#eff6ff",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    paddingHorizontal: 8,
+  },
+  moduleHeaderBadgeText: {
+    color: "#1d4ed8",
+    fontWeight: "800",
+    fontSize: 12,
+  },
+  servicesSectionTitle: {
+    color: "#102447",
+    fontSize: 17,
+    fontWeight: "800",
+  },
   emptyVehiclesCard: {
     backgroundColor: "#ffffff",
     borderRadius: 24,
@@ -2051,6 +2561,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#e8edf6",
   },
+  serviceRequestCardExpanded: {
+    borderColor: "#d7e4fb",
+    shadowColor: "#1e3a8a",
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
   serviceRequestHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -2075,6 +2592,21 @@ const styles = StyleSheet.create({
     color: "#64748b",
     marginTop: 6,
     fontWeight: "600",
+  },
+  serviceMetaList: {
+    marginTop: 10,
+    gap: 8,
+  },
+  serviceMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  serviceMetaItemText: {
+    color: "#475569",
+    fontSize: 12,
+    fontWeight: "600",
+    flex: 1,
   },
   serviceStatusPill: {
     marginLeft: "auto",
@@ -2118,6 +2650,31 @@ const styles = StyleSheet.create({
     color: "#166534",
     fontWeight: "800",
     marginBottom: 8,
+  },
+  clientQuoteDiagnosticBlock: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#d1fae5",
+  },
+  clientQuoteDiagnosticTitle: {
+    color: "#166534",
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  clientQuoteItem: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#d1fae5",
+  },
+  clientQuoteTotal: {
+    marginTop: 12,
+    color: "#166534",
+    fontWeight: "900",
+    fontSize: 16,
   },
   payButton: {
     marginTop: 12,
@@ -2172,6 +2729,35 @@ const styles = StyleSheet.create({
   workshopListTitle: {
     color: "#102447",
     fontWeight: "800",
+  },
+  timelineStep: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  timelineIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#e2e8f0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  timelineIconCompleted: {
+    backgroundColor: "#dbeafe",
+  },
+  timelineTextGroup: {
+    flex: 1,
+    gap: 2,
+  },
+  timelineLabel: {
+    color: "#0f172a",
+    fontWeight: "700",
+  },
+  timelineState: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "600",
   },
   workshopItem: {
     backgroundColor: "#ffffff",
@@ -2394,5 +2980,52 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     marginLeft: 6,
     fontSize: 13,
+  },
+  loadingOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  loadingCard: {
+    minWidth: 220,
+    backgroundColor: "#ffffff",
+    borderRadius: 20,
+    padding: 20,
+    alignItems: "center",
+    gap: 12,
+  },
+  loadingText: {
+    color: "#0f172a",
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  surveyCard: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: "#ffffff",
+    borderRadius: 22,
+    padding: 20,
+    gap: 14,
+  },
+  surveyTitle: {
+    color: "#0f172a",
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  surveyText: {
+    color: "#475569",
+    lineHeight: 20,
+  },
+  surveyStarsRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 8,
+  },
+  surveyActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
   },
 });

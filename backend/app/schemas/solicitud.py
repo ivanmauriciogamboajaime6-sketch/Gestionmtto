@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 
 
+class RepuestoSolicitadoItem(BaseModel):
+    nombre: str = Field(..., max_length=120)
+    cantidad: int = Field(..., ge=1, le=999)
+
+
 class SolicitudCreate(BaseModel):
     vehiculo_id: int
     tipo: str
@@ -26,6 +31,7 @@ class SolicitudDiagnosticoTallerUpdate(BaseModel):
     servicios: str = Field(..., max_length=800)
     horas: str = Field(..., max_length=20)
     materiales: str = Field(..., max_length=800)
+    repuestos: list[RepuestoSolicitadoItem] = Field(default_factory=list)
 
 
 class SolicitudRespuestaTallerUpdate(BaseModel):
@@ -35,12 +41,15 @@ class SolicitudRespuestaTallerUpdate(BaseModel):
 
 
 class SolicitudRespuestaProveedorUpdate(BaseModel):
-    marca: str
-    referencia: str
-    garantia: str
-    disponibilidad: str
-    precio: str
-    observacion: str
+    marca: str = ""
+    referencia: str = ""
+    garantia: str = ""
+    disponibilidad: str = ""
+    precio: str = ""
+    observacion: str = ""
+    documento_excel_nombre: str | None = Field(default=None, max_length=200)
+    documento_excel_mime: str | None = Field(default=None, max_length=120)
+    documento_excel_base64: str | None = None
 
 
 class SolicitudProveedorDevolucion(BaseModel):
@@ -57,4 +66,9 @@ class SolicitudAdministradorOmitirCotizacion(BaseModel):
 
 
 class SolicitudClienteAprobacion(BaseModel):
+    comentario: str | None = Field(default=None, max_length=300)
+
+
+class SolicitudClienteFinalizacion(BaseModel):
+    calificacion: int = Field(..., ge=1, le=5)
     comentario: str | None = Field(default=None, max_length=300)

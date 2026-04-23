@@ -29,6 +29,7 @@ type Vehiculo = {
 
 type Solicitud = {
   id?: number | string;
+  solicitud_origen_id?: number | string | null;
   tipo_servicio?: string;
   estado?: string;
   disponibilidad_cliente?: string;
@@ -134,6 +135,45 @@ const inferVehicleType = (vehiculo?: Vehiculo | null): "carro" | "moto" => {
   return "carro";
 };
 
+const filterVisibleClientRequests = (items: Solicitud[]) => {
+  const itemsByRoot = new Map<string, Solicitud[]>();
+
+  items.forEach((item) => {
+    const rootId = String(item.solicitud_origen_id ?? item.id ?? "");
+    const current = itemsByRoot.get(rootId) || [];
+    current.push(item);
+    itemsByRoot.set(rootId, current);
+  });
+
+  return Array.from(itemsByRoot.values()).map((group) => {
+    const root = group.find((item) => item.solicitud_origen_id == null) || group[0];
+    const childOffers = group
+      .filter((item) => item.solicitud_origen_id != null)
+      .sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+
+    if (childOffers.length === 0) {
+      return root;
+    }
+
+    const activeChildOffers = childOffers.filter((item) => !isHistoryStatus(item.estado));
+    const historyChildOffers = childOffers.filter((item) => isHistoryStatus(item.estado));
+
+    const selectedOffer =
+      activeChildOffers.find((item) => normalizeStatus(item.estado) === "aprobada") ||
+      activeChildOffers.find((item) => !isHistoryStatus(item.estado)) ||
+      historyChildOffers.find((item) => normalizeStatus(item.estado) === "finalizada") ||
+      historyChildOffers[historyChildOffers.length - 1] ||
+      childOffers[childOffers.length - 1];
+
+    return {
+      ...root,
+      ...selectedOffer,
+      id: root.id,
+      solicitud_origen_id: root.solicitud_origen_id,
+    };
+  });
+};
+
 export default function ServiceRequestScreen() {
   const router = useRouter();
   const navigation = useNavigation();
@@ -180,7 +220,9 @@ export default function ServiceRequestScreen() {
       const solicitudesData = await solicitudesResponse.json();
       const items = Array.isArray(vehiculosData) && vehiculosData.length > 0 ? vehiculosData : fallbackVehiculos;
       setVehiculos(items);
-      setSolicitudes(Array.isArray(solicitudesData) ? solicitudesData : []);
+      setSolicitudes(
+        filterVisibleClientRequests(Array.isArray(solicitudesData) ? solicitudesData : [])
+      );
 
       if (!selectedVehicleId && items[0]?.id != null) {
         setSelectedVehicleId(String(items[0].id));
